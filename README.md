@@ -1,880 +1,739 @@
-# 🏦 Access Control System for an International Bank
+# 🏦 Système de Contrôle d'Accès — Banque Internationale
 
-A comprehensive, production-ready **access control framework** for international banking operations. This system implements multiple security models (RBAC, BLP, Biba, ABAC, and Chinese Wall) to manage complex, multi-country banking environments with strict regulatory compliance.
+Un système complet et production-ready de **contrôle d'accès multi-modèles** pour opérations bancaires internationales. Implémente RBAC, BLP, Biba, ABAC et Chinese Wall dans une base PostgreSQL.
 
----
-
-## 📌 Table of Contents
-
-- [Overview](#overview)
-- [Key Features](#key-features)
-- [Architecture](#architecture)
-- [Security Models](#security-models)
-- [Database Schema](#database-schema)
-- [Real-World Use Cases](#real-world-use-cases)
-- [Quick Start](#quick-start)
-- [SQL Views & Queries](#sql-views--queries)
-- [Customization Guide](#customization-guide)
-- [Authors](#authors)
+**Auteurs :** Achraf Hasnaoui & Mohamed Aziz Foudhaili  
+**Date :** Mai 2026  
+**SGBD :** PostgreSQL 14+
 
 ---
 
-## 🎯 Overview
+## 📌 Table des Matières
 
-International banks operate in multiple countries with diverse teams (client relations, back-office, wealth management, compliance, audit, legal, etc.) accessing highly sensitive data—client portfolios, AML files, regulatory investigations, and transaction histories.
-
-This system solves a critical challenge: **How do you grant fine-grained access while maintaining strict data isolation, regulatory compliance, and preventing conflicts of interest?**
-
-**The Answer:** A layered, multi-model access control system that combines:
-- **RBAC** (Role-Based Access Control) – Who can do what?
-- **BLP** (Bell-LaPadula) – Confidentiality: no read-up, no write-down
-- **Biba** – Integrity: no write-up (low-level users can't modify high-level data)
-- **ABAC** (Attribute-Based Access Control) – Context matters (country, time, portfolio)
-- **Chinese Wall** – Prevent conflicts of interest in trading/advisory roles
+- [Vue d'ensemble](#vue-densemble)
+- [Architecture & Modèles de Sécurité](#architecture--modèles-de-sécurité)
+- [Schéma de Base de Données](#schéma-de-base-de-données)
+- [Données d'Exemple](#données-dexemple)
+- [Requêtes de Test](#requêtes-de-test)
+- [Guide d'Installation](#guide-dinstallation)
+- [Cas d'Usage Réels](#cas-dusage-réels)
+- [Guide de Personnalisation](#guide-de-personnalisation)
 
 ---
 
-## ✨ Key Features
+## 🎯 Vue d'Ensemble
 
-### 🔐 Multi-Model Security Framework
-- **RBAC**: 24+ roles across 10 teams (Relation Client, Back-Office, Wealth Management, Risk, Compliance/AML, Audit, Legal, Commercial, Regional Experts, Support)
-- **BLP**: 4 security levels (N1 Internal, N2 Sensitive, N3 Highly Regulated, N4 Critical/AML)
-- **Biba**: Integrity constraints for data modification
-- **ABAC**: Context-based policies (country filtering, portfolio assignment, time windows, temporary access)
-- **Chinese Wall**: Conflict-of-interest prevention for competing client groups
+### Problématique
 
-### 🌍 Multi-Country Operations
-- Support for 7+ countries (Tunisia, France, Germany, UK, USA, Singapore, Morocco)
-- Regulatory zone classifications (EU, Maghreb, Asia, US)
-- Country-based data filtering and access controls
+Les banques internationales opèrent dans plusieurs pays avec des équipes diversifiées (relations clients, back-office, gestion de patrimoine, conformité, audit, juridique...) accédant à des données hautement sensibles. Comment accorder un accès granulaire tout en maintenant l'isolation stricte des données, la conformité réglementaire et la prévention des conflits d'intérêts ?
 
-### 📋 Granular Permissions
-- 15+ resource types (DONNEES_CLIENT, PORTEFEUILLE, DOSSIER_KYC, DOSSIER_AML, etc.)
-- 6 action types (LIRE, ECRIRE, MODIFIER, SUPPRIMER, VALIDER, EXPORTER)
-- Minimum security level required per permission
+### Solution
 
-### ⏰ Temporary Access & Automatic Revocation
-- Grant time-bounded access for investigations or expertise
-- Automatic revocation after expiry (configurable)
-- Audit trail with justification
+Un système **multi-couches** combinant 5 modèles de sécurité :
 
-### 🔍 Comprehensive Audit Logging
-- Every access attempt logged with decision reason
-- Tracks which security model enforced the denial
-- IP address, timestamp, and user justification
-- Views for security dashboard and compliance reporting
-
-### 🚨 Advanced Constraints
-- **MFA Required** for N3/N4 data access
-- **Justification Mandatory** for sensitive operations
-- **Double Validation** for critical operations
-- **Temporal Controls** (working hours, day-of-week restrictions)
+| Modèle | Question | Approche |
+|--------|----------|----------|
+| **RBAC** | Qui peut faire quoi ? | Rôles × Permissions |
+| **BLP** | Niveau de confidentialité suffisant ? | Niveaux N1-N4 (no read-up) |
+| **Biba** | Pas de violation d'intégrité ? | Intégrité des données (no write-up) |
+| **ABAC** | Contexte autorisé ? | Pays, horaires, portefeuille |
+| **Chinese Wall** | Conflits d'intérêts détectés ? | Groupes concurrents |
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Architecture & Modèles de Sécurité
 
-### Database Layers
+### Niveaux de Sécurité (BLP)
 
 ```
-┌─────────────────────────────────────────┐
-│  ACCESS CONTROL DECISION ENGINE         │
-│  (controler_acces function)             │
-├─────────────────────────────────────────┤
-│  ✓ RBAC Check                           │
-│  ✓ BLP Check (Confidentiality)          │
-│  ✓ Biba Check (Integrity)               │
-│  ✓ ABAC Check (Context)                 │
-│  ✓ Chinese Wall Check (Conflicts)       │
-├─────────────────────────────────────────┤
-│  POLICY TABLES                          │
-│  ├── Roles & Permissions                │
-│  ├── User-Role Assignments              │
-│  ├── BLP Habilitations                  │
-│  ├── ABAC Policies                      │
-│  ├── Chinese Wall Registry              │
-│  └── Temporary Access Grants            │
-├─────────────────────────────────────────┤
-│  REFERENCE DATA                         │
-│  ├── Users & Teams                      │
-│  ├── Countries & Regulatory Zones       │
-│  ├── Security Levels                    │
-│  ├── Resources (Protected Objects)      │
-│  └── Audit Journal                      │
-└─────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│ N1 - INTERNE METIER                      (Sans MFA, log std) │
+│     Opérations courantes, référentiels internes             │
+├─────────────────────────────────────────────────────────────┤
+│ N2 - SENSIBLE                            (Sans MFA, log renforcé) │
+│     Données clients, contrats, historiques transactions     │
+├─────────────────────────────────────────────────────────────┤
+│ N3 - TRES SENSIBLE / REGLEMENTE          (MFA requis, log complet) │
+│     KYC détaillé, ordres de marché, risque stratégique      │
+├─────────────────────────────────────────────────────────────┤
+│ N4 - CRITIQUE / CONFIDENTIEL EXTREME     (MFA + double validation) │
+│     Dossiers AML, sanctions, investigations réglementaires  │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### Core Tables (16 total)
+### Structure des Tables (14 tables)
 
-| Table | Purpose | Records |
-|-------|---------|---------|
-| `niveaux_securite` | Security level definitions (N1–N4) with MFA requirements | 4 |
-| `pays` | Countries and regulatory zones | 7 |
-| `equipes` | Team definitions (10 operational/control/expertise teams) | 10 |
-| `roles` | Role definitions (24+ roles across all teams) | 24+ |
-| `permissions` | Granular permissions (resource type + action combinations) | 22 |
-| `role_permissions` | RBAC mapping: which roles have which permissions | 70+ |
-| `utilisateurs` | User master data (matricule, email, team, country, MFA status) | 20 |
-| `utilisateur_roles` | Active role assignments for users (with date tracking) | 20+ |
-| `ressources` | Protected objects (clients, portfolios, investigations, AML files) | 15 |
-| `blp_habilitations` | Security clearance level per user (BLP MAC model) | 20 |
-| `abac_politiques` | Context rules (country filters, time windows, duration limits) | 7 |
-| `acces_temporaire` | Time-bounded access grants with automatic revocation | Variable |
-| `chinese_wall_historique` | Conflict-of-interest tracking (groups already accessed) | Variable |
-| `journal_audit` | Complete access decision log (all attempts, denials, reasons) | Variable |
+```
+TABLES REFERENCE
+├── niveaux_securite (4 enregistrements)
+├── pays (7 enregistrements)
+├── equipes (10 enregistrements)
+└── ressources (17 enregistrements)
 
----
+TABLES RBAC
+├── roles (24+ roles métier)
+├── permissions (22 permissions granulaires)
+├── role_permissions (associations)
+└── utilisateur_roles (affectations avec dates)
 
-## 🔒 Security Models Explained
+TABLES MAC (Mandatory Access Control)
+├── blp_habilitations (clearance par utilisateur)
+└── utilisateurs (20 collaborateurs)
 
-### 1️⃣ RBAC (Role-Based Access Control)
+TABLES ABAC
+└── abac_politiques (10 politiques contextuelles)
 
-**Question:** Does this user's role allow this action on this resource type?
+TABLES TEMPORAIRES
+├── acces_temporaire (accès bornés avec révocation auto)
+└── chinese_wall_historique (tracking conflits)
 
-**Example Teams & Roles:**
-- **Relation Clientèle** (3 roles): Advisor, Business Advisor, Agency Manager
-- **Back-Office** (2 roles): Operator, Supervisor
-- **Wealth Management** (3 roles): Advisor, Portfolio Analyst, Manager
-- **Risk** (3 roles): Credit Analyst, Market Analyst, Manager
-- **Compliance/AML** (4 roles): AML Analyst, KYC Manager, Sanctions Specialist, Manager
-- **Audit** (3 roles): Auditor, Senior Auditor, Audit Director
-- **Legal** (3 roles): Banking Counsel, Compliance Counsel, General Counsel
-
-**Rule:** A user can perform `action` on `resource_type` **only if** their role(s) have an explicit permission entry.
-
-**SQL Check:**
-```sql
-SELECT verifier_rbac(
-    p_id_utilisateur := 1,           -- User ID
-    p_type_ressource := 'DONNEES_CLIENT',  -- Resource type
-    p_action := 'LIRE'               -- Action
-);
+TABLES AUDIT
+└── journal_audit (trace immuable de toutes les décisions)
 ```
 
 ---
 
-### 2️⃣ BLP (Bell-LaPadula) – Confidentiality
+## 📊 Schéma de Base de Données
 
-**Question:** Is the user's security clearance level sufficient to access this data?
+### 1. Tables de Référence
 
-**4 Security Levels:**
-- **N1** (Internal Operational): Routine operations, internal reference data
-- **N2** (Sensitive): Client data, contracts, transaction history (audit required)
-- **N3** (Highly Regulated): Detailed KYC, market orders, strategic risk (MFA required)
-- **N4** (Critical/Confidential): AML files, sanctions, regulatory investigations (MFA + double validation)
-
-**Rules:**
-- **No Read-Up:** User with N2 clearance cannot read N3/N4 data
-- **No Write-Down:** User with N3 clearance cannot write to N1/N2 data (except under Biba rules)
-
-**Example:**
-- Back-office operator (N1 clearance) **denied** reading a risk analysis (N3)
-- ✅ Reason: BLP violation – insufficient clearance level
-
----
-
-### 3️⃣ Biba – Integrity
-
-**Question:** Can this user modify data without violating integrity constraints?
-
-**Rules:**
-- **No Write-Up:** A low-level user (N1) cannot write to high-level data (N3/N4)
-- **No Read-Down (Optional):** A high-level user shouldn't read low-level data (relaxed for auditors)
-
-**Example:**
-- Back-office operator (N1) attempts to modify a risk report (N3)
-- ✅ Denied: Biba violation – no write-up
-
----
-
-### 4️⃣ ABAC (Attribute-Based Access Control) – Context Matters
-
-**Question:** Given the context (user attributes, resource attributes, environment), is access allowed?
-
-**Contextual Filters:**
-- **Country Filtering**: Client Advisor restricted to clients in their home country
-- **Portfolio Assignment**: Wealth Manager can only access portfolios assigned to them
-- **Time Windows**: Access only during business hours (08:00–18:30)
-- **Duration Limits**: Temporary access expires automatically
-- **Day Restrictions**: Access only Mon–Fri (or 24/7 for AML)
-
-**Example Policies:**
+#### **niveaux_securite**
 ```
-Policy: RC_pays_portefeuille
-├─ Role: conseiller_particulier
-├─ Country Filter: ✓ (advisor only sees own country)
-├─ Portfolio Filter: ✓ (advisor only sees assigned clients)
-├─ Hours: 08:00–18:30
-└─ Days: Mon–Sat
-
-Policy: EXPERT_temporaire
-├─ Role: expert_regional
-├─ Max Duration: 720 hours (30 days)
-├─ Hours: 08:00–18:00
-└─ Days: Mon–Fri
+niveau          | designation                    | mfa_requis | double_valid | journalisation
+────────────────┼────────────────────────────────┼────────────┼──────────────┼──────────────
+N1              | Interne metier                 | FALSE      | FALSE        | STANDARD
+N2              | Sensible                       | FALSE      | FALSE        | RENFORCE
+N3              | Tres sensible / Reglemente    | TRUE       | FALSE        | COMPLET
+N4              | Critique / Confidentiel extreme| TRUE       | TRUE         | COMPLET
 ```
 
-**SQL Example:**
-```sql
-INSERT INTO abac_politiques (nom, id_role, type_ressource, filtre_pays, duree_max_heures)
-VALUES ('GP_portefeuille_strict', 3, 'PORTEFEUILLE', TRUE, NULL);
+#### **pays**
+```
+code_pays | nom          | zone_regulatoire
+──────────┼──────────────┼─────────────────
+TN        | Tunisie      | MAGHREB
+FR        | France       | UE
+DE        | Allemagne    | UE
+GB        | Royaume-Uni  | UK
+US        | Etats-Unis   | US
+SG        | Singapour    | ASIE
+MA        | Maroc        | MAGHREB
 ```
 
----
-
-### 5️⃣ Chinese Wall – Conflict of Interest
-
-**Question:** Has this user already accessed competing information that would create a conflict?
-
-**Use Case:** A wealth manager cannot advise both Company A and its competitor Company B.
-
-**Rules:**
-- Track which "conflict group" (e.g., GROUPE_INDUS_ALPHA) a user accesses
-- Once accessed, block access to conflicting groups (e.g., GROUPE_INDUS_BETA)
-
-**Example:**
-- Wealth Manager Sophie accesses Portfolio A (Group: Industrial Alpha)
-- ✅ Later denied access to Portfolio B (Group: Industrial Beta) due to Chinese Wall
-
----
-
-## 📊 Database Schema
-
-### Detailed Table Specifications
-
-#### **Reference Tables**
-
-**niveaux_securite** - Security Level Definitions
-```sql
-CREATE TABLE niveaux_securite (
-    niveau          niveau_enum PRIMARY KEY,
-    designation     VARCHAR(50),
-    description     TEXT,
-    mfa_requis      BOOLEAN,
-    double_valid    BOOLEAN,
-    journalisation  VARCHAR(20)  -- STANDARD, RENFORCE, COMPLET
-);
+#### **equipes** (10 équipes)
+```
+id | nom                      | categorie      | effectif | niveau_max
+───┼──────────────────────────┼────────────────┼──────────┼───────────
+1  | Relation clientele       | OPERATIONNEL   | 120      | N2
+2  | Back-office              | OPERATIONNEL   | 80       | N2
+3  | Gestion de patrimoine    | OPERATIONNEL   | 60       | N3
+4  | Risque                   | OPERATIONNEL   | 40       | N3
+5  | Conformite / AML         | CONTROLE       | 35       | N4
+6  | Audit interne            | CONTROLE       | 20       | N4
+7  | Juridique                | CONTROLE       | 20       | N4
+8  | Cadres commerciaux       | EXPERTISE      | 25       | N2
+9  | Experts regionaux        | EXPERTISE      | 10       | N3
+10 | Support                  | SUPPORT        | 90       | N1
 ```
 
-**pays** - Countries & Regulatory Zones
-```sql
-CREATE TABLE pays (
-    code_pays       CHAR(2) PRIMARY KEY,  -- ISO 3166-1
-    nom             VARCHAR(100),
-    zone_regulatoire VARCHAR(50)  -- UE, MAGHREB, ASIE, US
-);
+### 2. Tables RBAC
+
+#### **roles** (24+ rôles)
+```
+id | nom_role                  | equipe | niveau_acces
+───┼───────────────────────────┼────────┼──────────────
+1  | conseiller_particulier    | 1      | N2
+2  | conseiller_entreprise     | 1      | N2
+3  | responsable_agence        | 1      | N2
+4  | guichetier_responsable    | 1      | N2
+5  | operateur_bo              | 2      | N1
+6  | superviseur_bo            | 2      | N2
+7  | conseiller_patrimoine     | 3      | N3
+8  | analyste_portefeuille     | 3      | N3
+... (et 16 autres)
 ```
 
-**equipes** - Team Definitions
-```sql
-CREATE TABLE equipes (
-    id_equipe       SERIAL PRIMARY KEY,
-    nom             VARCHAR(100) UNIQUE,
-    categorie       VARCHAR(30),  -- OPERATIONNEL, CONTROLE, EXPERTISE, SUPPORT
-    effectif_cible  INT,
-    niveau_max      niveau_enum,
-    description     TEXT
-);
+#### **permissions** (22 permissions)
+```
+id | ressource_type       | action    | niveau_min | description
+───┼──────────────────────┼───────────┼────────────┼─────────────────────────────────
+1  | DONNEES_CLIENT       | LIRE      | N2         | Lire données de base d'un client
+2  | DONNEES_CLIENT       | MODIFIER  | N2         | Modifier données client (KYC)
+3  | PORTEFEUILLE         | LIRE      | N3         | Consulter portefeuille détaillé
+4  | PORTEFEUILLE         | ECRIRE    | N3         | Enregistrer ordre sur portefeuille
+5  | DOSSIER_KYC          | LIRE      | N2         | Lire dossier KYC de base
+6  | DOSSIER_KYC          | MODIFIER  | N3         | Modifier/compléter dossier KYC
+7  | DOSSIER_AML          | LIRE      | N4         | Lire dossier AML actif
+8  | DOSSIER_AML          | ECRIRE    | N4         | Créer/enrichir dossier AML
+... (et 14 autres)
 ```
 
-#### **RBAC Tables**
+### 3. Tables Utilisateurs
 
-**roles** - Role Definitions
-```sql
-CREATE TABLE roles (
-    id_role         SERIAL PRIMARY KEY,
-    nom_role        VARCHAR(80) UNIQUE,
-    id_equipe       INT REFERENCES equipes,
-    niveau_acces    niveau_enum,
-    description     TEXT
-);
+#### **utilisateurs** (20 collaborateurs)
+```
+id | matricule | nom        | prenom    | email                    | equipe | pays | statut | mfa_actif
+───┼───────────┼────────────┼───────────┼──────────────────────────┼────────┼──────┼────────┼──────────
+1  | RC001     | Ben Ali    | Sami      | sami.benali@banque.tn    | 1      | TN   | ACTIF  | FALSE
+2  | RC002     | Martin     | Claire    | claire.martin@banque.fr  | 1      | FR   | ACTIF  | FALSE
+3  | RC003     | Dupont     | Marc      | marc.dupont@banque.fr    | 1      | FR   | ACTIF  | FALSE
+4  | BO001     | Trabelsi   | Nadia     | nadia.trabelsi@banque.tn | 2      | TN   | ACTIF  | FALSE
+5  | BO002     | Schmidt    | Hans      | hans.schmidt@banque.de   | 2      | DE   | ACTIF  | FALSE
+6  | GP001     | Leblanc    | Sophie    | sophie.leblanc@banque.fr | 3      | FR   | ACTIF  | TRUE
+7  | GP002     | Hamdi      | Karim     | karim.hamdi@banque.tn    | 3      | TN   | ACTIF  | TRUE
+8  | RS001     | Lambert    | Eric      | eric.lambert@banque.fr   | 4      | FR   | ACTIF  | TRUE
+9  | RS002     | Nguyen     | Lan       | lan.nguyen@banque.sg     | 4      | SG   | ACTIF  | TRUE
+10 | AML001    | Moreau     | Julie     | julie.moreau@banque.fr   | 5      | FR   | ACTIF  | TRUE
+... (10 autres utilisateurs)
 ```
 
-**permissions** - Granular Action Permissions
-```sql
-CREATE TABLE permissions (
-    id_permission   SERIAL PRIMARY KEY,
-    ressource_type  VARCHAR(50),
-    action          action_enum,  -- LIRE, ECRIRE, MODIFIER, SUPPRIMER, VALIDER, EXPORTER
-    niveau_min      niveau_enum,
-    description     TEXT,
-    UNIQUE(ressource_type, action)
-);
+### 4. Tables Ressources
+
+#### **ressources** (17 ressources protégées)
+```
+id | reference        | type_ressource      | niveau | pays | groupe_conflict      | proprietaire
+───┼──────────────────┼─────────────────────┼────────┼──────┼──────────────────────┼──────────────
+1  | CLI-TN-001       | DONNEES_CLIENT      | N2     | TN   | NULL                 | 1
+2  | CLI-FR-001       | DONNEES_CLIENT      | N2     | FR   | NULL                 | 2
+3  | PTF-FR-GP01      | PORTEFEUILLE        | N3     | FR   | GROUPE_INDUS_ALPHA   | 6
+4  | PTF-TN-GP02      | PORTEFEUILLE        | N3     | TN   | GROUPE_INDUS_BETA    | 7
+5  | KYC-TN-001       | DOSSIER_KYC         | N2     | TN   | NULL                 | 1
+6  | KYC-FR-AML01     | DOSSIER_KYC         | N3     | FR   | NULL                 | 10
+7  | AML-FR-2024-01   | DOSSIER_AML         | N4     | FR   | NULL                 | 10
+8  | AML-TN-2024-01   | DOSSIER_AML         | N4     | TN   | NULL                 | 11
+... (9 autres ressources)
 ```
 
-**role_permissions** - RBAC Mapping
-```sql
-CREATE TABLE role_permissions (
-    id_role         INT REFERENCES roles,
-    id_permission   INT REFERENCES permissions,
-    PRIMARY KEY (id_role, id_permission)
-);
+### 5. Table BLP
+
+#### **blp_habilitations**
+```
+id_utilisateur | niveau_max | date_attribution | attribue_par | commentaire
+───────────────┼────────────┼──────────────────┼──────────────┼───────────────────────────
+1              | N2         | 2026-01-15       | 14           | Habilitation initiale - equipe 1
+2              | N2         | 2026-01-15       | 14           | Habilitation initiale - equipe 1
+3              | N2         | 2026-01-15       | 14           | Habilitation initiale - equipe 1
+6              | N3         | 2026-01-15       | 14           | Habilitation initiale - equipe 3
+7              | N3         | 2026-01-15       | 14           | Habilitation initiale - equipe 3
+... (16 autres)
 ```
 
-#### **User & Resource Tables**
+### 6. Table ABAC
 
-**utilisateurs** - User Master Data
-```sql
-CREATE TABLE utilisateurs (
-    id_utilisateur  SERIAL PRIMARY KEY,
-    matricule       VARCHAR(20) UNIQUE,
-    nom             VARCHAR(100),
-    prenom          VARCHAR(100),
-    email           VARCHAR(150) UNIQUE,
-    id_equipe       INT REFERENCES equipes,
-    code_pays       CHAR(2) REFERENCES pays,
-    statut          statut_enum,  -- ACTIF, INACTIF, SUSPENDU, EXPIRE
-    mfa_actif       BOOLEAN DEFAULT FALSE,
-    derniere_cnx    TIMESTAMP,
-    date_creation   TIMESTAMP DEFAULT NOW()
-);
+#### **abac_politiques** (10 politiques contextuelles)
 ```
-
-**utilisateur_roles** - User Role Assignments
-```sql
-CREATE TABLE utilisateur_roles (
-    id_utilisateur  INT REFERENCES utilisateurs,
-    id_role         INT REFERENCES roles,
-    date_debut      DATE DEFAULT CURRENT_DATE,
-    date_fin        DATE,  -- NULL = permanent
-    actif           BOOLEAN DEFAULT TRUE,
-    PRIMARY KEY (id_utilisateur, id_role)
-);
-```
-
-**ressources** - Protected Objects
-```sql
-CREATE TABLE ressources (
-    id_ressource    SERIAL PRIMARY KEY,
-    reference       VARCHAR(50) UNIQUE,
-    type_ressource  VARCHAR(50),
-    niveau_requis   niveau_enum,
-    code_pays       CHAR(2) REFERENCES pays,
-    id_proprietaire INT REFERENCES utilisateurs,
-    description     TEXT,
-    actif           BOOLEAN DEFAULT TRUE,
-    date_creation   TIMESTAMP DEFAULT NOW()
-);
-```
-
-#### **MAC (Mandatory Access Control) Tables**
-
-**blp_habilitations** - User Security Clearance
-```sql
-CREATE TABLE blp_habilitations (
-    id_utilisateur  INT PRIMARY KEY REFERENCES utilisateurs,
-    niveau_max      niveau_enum,  -- Maximum clearance level
-    date_attribution DATE,
-    attribue_par    INT REFERENCES utilisateurs,
-    commentaire     TEXT
-);
-```
-
-#### **ABAC & Context Tables**
-
-**abac_politiques** - Contextual Access Policies
-```sql
-CREATE TABLE abac_politiques (
-    id_politique    SERIAL PRIMARY KEY,
-    nom             VARCHAR(100),
-    id_role         INT REFERENCES roles,
-    type_ressource  VARCHAR(50),
-    filtre_pays     BOOLEAN,
-    filtre_portefeuille BOOLEAN,
-    duree_max_heures INT,  -- NULL = no time limit
-    heure_debut     TIME,  -- Business hour start
-    heure_fin       TIME,  -- Business hour end
-    jours_semaine   VARCHAR(20),  -- LUN-VEN, LUN-DIM, etc.
-    description     TEXT
-);
-```
-
-**acces_temporaire** - Time-Bounded Access Grants
-```sql
-CREATE TABLE acces_temporaire (
-    id_acces        SERIAL PRIMARY KEY,
-    id_utilisateur  INT REFERENCES utilisateurs,
-    id_ressource    INT REFERENCES ressources,
-    justification   TEXT NOT NULL,
-    date_debut      TIMESTAMP DEFAULT NOW(),
-    date_fin        TIMESTAMP NOT NULL,
-    autorise_par    INT REFERENCES utilisateurs,
-    statut          statut_enum DEFAULT 'ACTIF',
-    revocation_auto BOOLEAN DEFAULT TRUE,
-    date_revocation TIMESTAMP,
-    CONSTRAINT chk_dates CHECK (date_fin > date_debut)
-);
-```
-
-#### **Conflict & Audit Tables**
-
-**chinese_wall_historique** - Conflict-of-Interest Tracking
-```sql
-CREATE TABLE chinese_wall_historique (
-    id              SERIAL PRIMARY KEY,
-    id_utilisateur  INT REFERENCES utilisateurs,
-    id_ressource    INT REFERENCES ressources,
-    groupe_conflict VARCHAR(50),  -- GROUPE_INDUS_A, GROUPE_INDUS_B, etc.
-    date_consultation TIMESTAMP DEFAULT NOW(),
-    UNIQUE (id_utilisateur, groupe_conflict)
-);
-```
-
-**journal_audit** - Complete Access Decision Log
-```sql
-CREATE TABLE journal_audit (
-    id_journal      BIGSERIAL PRIMARY KEY,
-    id_utilisateur  INT REFERENCES utilisateurs,
-    id_ressource    INT REFERENCES ressources,
-    type_ressource  VARCHAR(50),
-    action          action_enum,
-    decision        decision_enum,  -- AUTORISE, REFUSE, EN_ATTENTE
-    motif_refus     TEXT,  -- Reason if REFUSED
-    modele_bloquant VARCHAR(20),  -- RBAC, ABAC, BLP, BIBA, CW, SYSTEME
-    adresse_ip      INET,
-    horodatage      TIMESTAMP DEFAULT NOW(),
-    justification   TEXT  -- Required for N3/N4
-);
-```
-
-### Entity Relationship Diagram (Conceptual)
-
-```
-┌──────────────────┐        ┌──────────────┐
-│  utilisateurs    │────────│  equipes     │
-├──────────────────┤        ├──────────────┤
-│ id_utilisateur   │        │ id_equipe    │
-│ matricule        │        │ nom          │
-│ nom, prenom      │        │ categorie    │
-│ email            │        │ niveau_max   │
-│ code_pays ───────┼────────┼──┐           │
-│ statut           │        │  │           │
-│ mfa_actif        │        │  │           │
-└──────────────────┘        └──────────────┘
-        │                           │
-        │ ┌─────────────────────────┘
-        │ │
-        ├─┤  ┌──────────────────────┐
-        │ └──│  roles               │
-        │    ├──────────────────────┤
-        │    │ id_role              │
-        │    │ nom_role             │
-        │    │ niveau_acces (N1-N4) │
-        │    └──────────────────────┘
-        │           │
-        │           │ ┌─────────────────────┐
-        │           └─│ permissions         │
-        │             ├─────────────────────┤
-        │             │ ressource_type      │
-        │             │ action (LIRE, etc.) │
-        │             │ niveau_min          │
-        │             └─────────────────────┘
-        │
-        ├─── utilisateur_roles ───┐
-        │                         │
-        │                    ┌────────────────┐
-        │                    │ blp_habilitations
-        │                    ├────────────────┤
-        │                    │ niveau_max     │
-        │                    │ (N1-N4)        │
-        │                    └────────────────┘
-        │
-        ├─── ressources ──────────┐
-        │                         │
-        │                    ┌────────────────┐
-        │                    │ journal_audit  │
-        │                    ├────────────────┤
-        │                    │ action         │
-        │                    │ decision       │
-        │                    │ modele_bloquant│
-        │                    └────────────────┘
-        │
-        └─── acces_temporaire
-             ├── id_ressource
-             └── date_fin (auto-revocation)
+id | nom                       | role | filtre_pays | filtre_portefeuille | heures      | jours
+───┼───────────────────────────┼──────┼─────────────┼─────────────────────┼─────────────┼───────────
+1  | RC_pays_portefeuille      | 1    | TRUE        | TRUE                | 08:00-18:30 | LUN-SAM
+2  | GP_portefeuille_strict    | 7    | TRUE        | TRUE                | 07:30-20:00 | LUN-VEN
+3  | RISQUE_lecture_seule      | 11   | FALSE       | FALSE               | 08:00-19:00 | LUN-VEN
+4  | AML_dossier_assigne       | 13   | TRUE        | FALSE               | 00:00-23:59 | LUN-DIM
+5  | AUDIT_lecture_globale     | 18   | FALSE       | FALSE               | 08:00-20:00 | LUN-VEN
+6  | EXPERT_temporaire         | 23   | TRUE        | FALSE  720h (30j)   | 08:00-18:00 | LUN-VEN
+7  | COMMERCIAL_kpi_seulement  | 21   | FALSE       | FALSE               | 08:00-19:00 | LUN-VEN
+8  | GUICHETIER_clients        | 4    | TRUE        | FALSE               | 07:30-18:30 | LUN-SAM
+9  | GUICHETIER_operations     | 4    | TRUE        | FALSE               | 07:00-19:30 | LUN-SAM
+10 | GUICHETIER_urgence        | 4    | TRUE        | FALSE     4h        | 00:00-23:59 | LUN-DIM
 ```
 
 ---
 
-## 🎬 Real-World Use Cases
+## 📋 Données d'Exemple
 
-### ✅ Case 1: Client Advisor Reading Own Client Data
+### Équipes et Utilisateurs par Rôle
 
-**User:** Sami Ben Ali (Relation Clientèle, Tunisia)
-**Action:** Read client data (CLI-TN-001)
-**Decision:** ✅ **AUTORISE**
+#### Relation Clientèle (équipe 1)
+- **Sami Ben Ali (RC001, N2)** : Conseiller particulier, Tunisie
+- **Claire Martin (RC002, N2)** : Conseiller particulier, France
+- **Marc Dupont (RC003, N2)** : Conseiller entreprise, France
+- **Mehdi Gharbi (GR001, N2)** : Guichetier responsable, Tunisie
+- **Isabelle Leroux (GR002, N2)** : Guichetier responsable, France
+- **Faycal El Amri (GR003, N2)** : Guichetier responsable, Maroc
 
-**Security Checks:**
-| Check | Result | Reason |
-|-------|--------|--------|
-| RBAC | ✅ Pass | Role `conseiller_particulier` has permission `DONNEES_CLIENT/LIRE` |
-| BLP | ✅ Pass | User N2 clearance ≥ Resource N2 level |
-| Biba | ✅ Pass | N/A (read operation) |
-| ABAC | ✅ Pass | Client in Tunisia (user's country) & assigned portfolio |
-| Chinese Wall | ✅ Pass | No conflict recorded |
+#### Back-Office (équipe 2)
+- **Nadia Trabelsi (BO001, N1)** : Opérateur, Tunisie
+- **Hans Schmidt (BO002, N2)** : Superviseur, Allemagne
 
-**Audit Log:**
-```
-Utilisateur: Sami Ben Ali (RC001)
-Ressource: CLI-TN-001 (DONNEES_CLIENT, N2)
-Action: LIRE
-Décision: AUTORISE
-Modele: NONE
-IP: 196.20.1.10
-Justification: NULL (N2 doesn't require justification)
-```
+#### Gestion de Patrimoine (équipe 3)
+- **Sophie Leblanc (GP001, N3)** : Conseiller patrimoine, France 🔴 **(Chinese Wall avec INDUS_BETA)**
+- **Karim Hamdi (GP002, N3)** : Conseiller patrimoine, Tunisie
 
----
+#### Risque (équipe 4)
+- **Eric Lambert (RS001, N3)** : Analyste risque crédit, France 🔴 **(Chinese Wall avec INDUS_BETA)**
+- **Lan Nguyen (RS002, N3)** : Analyste risque marché, Singapour
 
-### ❌ Case 2: Commercial Director Attempts AML Access
+#### Conformité / AML (équipe 5)
+- **Julie Moreau (AML001, N4)** : Analyste AML, France
+- **Walid Chahed (AML002, N4)** : Analyste AML, Tunisie
+- **James Wilson (AML003, N4)** : Spécialiste sanctions, Royaume-Uni
 
-**User:** Luc Renard (Commercial Director, France)
-**Action:** Read AML investigation file (AML-FR-2024-01)
-**Decision:** ❌ **REFUSE**
+#### Audit (équipe 6)
+- **Pierre Fontaine (AI001, N3)** : Auditeur, France
+- **Leila Bouaziz (AI002, N4)** : Auditeur senior, Tunisie
 
-**Security Checks:**
-| Check | Result | Reason |
-|-------|--------|--------|
-| RBAC | ❌ **FAIL** | Role `directeur_commercial` has no permission on `DOSSIER_AML/LIRE` |
-| BLP | ❌ **FAIL** | User N2 clearance < Resource N4 required |
-| Biba | N/A | Not reached |
-| ABAC | N/A | Not reached |
-| Chinese Wall | N/A | Not reached |
+#### Juridique (équipe 7)
+- **Anne Bernard (JR001, N3)** : Juriste bancaire, France
+- **Rania Slimane (JR002, N4)** : Juriste conformité, Tunisie
 
-**Audit Log:**
-```
-Utilisateur: Luc Renard (CC001)
-Ressource: AML-FR-2024-01 (DOSSIER_AML, N4)
-Action: LIRE
-Décision: REFUSE
-Motif: Niveau habilitation insuffisant : N2 < N4 requis
-Modele Bloquant: BLP
-IP: 10.0.1.45
-```
+#### Cadres Commerciaux (équipe 8)
+- **Luc Renard (CC001, N2)** : Directeur commercial, France
+- **Tarek Mansour (CC002, N2)** : Responsable segment, Tunisie
+
+#### Experts Régionaux (équipe 9)
+- **Anna Kowalski (ER001, N3)** : Expert régional, France ⏰ **(Accès temporaire: INV-REG-2024, 30 jours)**
+
+#### Support (équipe 10)
+- **Tom Laurent (SP001, N1)** : Agent support, France
 
 ---
 
-### ⏰ Case 3: Regional Expert Temporary Access
+## 🧪 Requêtes de Test
 
-**User:** Anna Kowalski (Expert Regional, France)
-**Action:** Read regulatory investigation (INV-REG-2024, N4)
-**Duration:** 30 days (auto-revoke)
-**Decision:** ✅ **AUTORISE** (with justification)
+### 1️⃣ CAS AUTORISÉ : Conseiller lit son client
 
-**Security Checks:**
-| Check | Result | Reason |
-|-------|--------|--------|
-| RBAC | ✅ Pass | Temporary role grant via `acces_temporaire` |
-| BLP | ✅ Pass | User N3 clearance + Temporary N4 grant |
-| Biba | ✅ Pass | Read-only operation |
-| ABAC | ✅ Pass | Temporary access window: 30 days / Hours: 08:00–18:00 |
-| Chinese Wall | ✅ Pass | Investigation context doesn't conflict |
-
-**Database Entry:**
 ```sql
-INSERT INTO acces_temporaire
-  (id_utilisateur, id_ressource, justification, date_debut, date_fin, autorise_par)
-VALUES
-  (19, (SELECT id_ressource FROM ressources WHERE reference='INV-REG-2024'),
-   'Investigation reglementaire ACPR 2024 - expertise droit tunisien requise',
-   NOW(),
-   NOW() + INTERVAL '30 days',
-   (SELECT id_utilisateur FROM utilisateurs WHERE matricule='AI002'));
+-- Sami Ben Ali (N2) lit CLI-TN-001 (N2, Tunisie)
+SELECT 
+    u.matricule, u.nom, u.prenom,
+    r.reference, r.type_ressource, r.niveau_requis,
+    h.niveau_max,
+    'DEVRAIT AUTORISER' as verdict
+FROM utilisateurs u
+JOIN blp_habilitations h ON u.id_utilisateur = h.id_utilisateur
+JOIN ressources r ON r.reference = 'CLI-TN-001'
+WHERE u.matricule = 'RC001';
+
+-- Résultat:
+-- RC001 | Ben Ali | Sami | CLI-TN-001 | DONNEES_CLIENT | N2 | N2 | DEVRAIT AUTORISER
 ```
+
+**Justification :**
+- ✅ **RBAC**: Role `conseiller_particulier` a permission `DONNEES_CLIENT/LIRE`
+- ✅ **BLP**: N2 ≥ N2
+- ✅ **ABAC**: Client en Tunisie (pays de l'utilisateur)
+- ✅ **Chinese Wall**: N/A
 
 ---
 
-### 🚫 Case 4: Chinese Wall Conflict Detection
+### 2️⃣ CAS REFUSÉ (BLP) : Directeur commercial accède à dossier AML
 
-**User:** Sophie Leblanc (Wealth Manager, France)
-**Action 1:** Read Portfolio A (PTF-FR-GP01, Group: GROUPE_INDUS_ALPHA) ✅ AUTORISE
-**Action 2:** Read Portfolio B (PTF-TN-GP02, Group: GROUPE_INDUS_BETA) ❌ REFUSE
-
-**Reason:** Chinese Wall – After accessing GROUPE_INDUS_ALPHA, Sophie is blocked from competing group.
-
-**SQL:**
 ```sql
--- After first access to Portfolio A (GROUPE_INDUS_ALPHA)
-INSERT INTO chinese_wall_historique (id_utilisateur, id_ressource, groupe_conflict)
-VALUES (6, 1, 'GROUPE_INDUS_ALPHA');
+-- Luc Renard (N2) tente de lire AML-FR-2024-01 (N4)
+SELECT 
+    u.matricule, u.nom, u.prenom,
+    'ACCES REFUSE' as verdict,
+    'BLP - Niveau insuffisant: N2 < N4 requis' as motif
+FROM utilisateurs u
+JOIN blp_habilitations h ON u.id_utilisateur = h.id_utilisateur
+WHERE u.matricule = 'CC001'
+  AND (SELECT niveau_requis FROM ressources WHERE reference = 'AML-FR-2024-01') > h.niveau_max;
 
--- Subsequent access to Portfolio B (GROUPE_INDUS_BETA) is REFUSED
-SELECT verifier_chinese_wall(6, 2);  -- Returns FALSE
+-- Résultat:
+-- CC001 | Renard | Luc | ACCES REFUSE | BLP - Niveau insuffisant: N2 < N4 requis
+```
+
+**Justification :**
+- ❌ **BLP**: N2 < N4 → **REFUSÉ**
+
+---
+
+### 3️⃣ CAS REFUSÉ (RBAC) : Conseiller accède à portefeuille
+
+```sql
+-- Sami Ben Ali (conseiller_particulier) tente de lire PTF-FR-GP01 (PORTEFEUILLE)
+-- Role conseiller_particulier n'a pas permission PORTEFEUILLE/LIRE
+SELECT 
+    u.matricule, u.nom,
+    'ACCES REFUSE' as verdict,
+    'RBAC - Role ne dispose pas de permission' as motif
+FROM utilisateurs u
+JOIN utilisateur_roles ur ON u.id_utilisateur = ur.id_utilisateur
+JOIN roles r ON ur.id_role = r.id_role
+WHERE u.matricule = 'RC001'
+  AND r.nom_role = 'conseiller_particulier'
+  AND NOT EXISTS (
+      SELECT 1 FROM role_permissions rp
+      JOIN permissions p ON rp.id_permission = p.id_permission
+      WHERE rp.id_role = r.id_role
+        AND p.ressource_type = 'PORTEFEUILLE'
+        AND p.action = 'LIRE'
+  );
+
+-- Résultat:
+-- RC001 | Ben Ali | ACCES REFUSE | RBAC - Role ne dispose pas de permission
 ```
 
 ---
 
-## 🚀 Quick Start
+### 4️⃣ CAS REFUSÉ (Chinese Wall) : Conseiller accède à groupe concurrent
 
-### 1. Prerequisites
+```sql
+-- Sophie Leblanc (GP001) a consulté PTF-FR-GP01 (GROUPE_INDUS_ALPHA)
+-- Tente maintenant d'accéder à PTF-TN-GP02 (GROUPE_INDUS_BETA)
+SELECT 
+    u.matricule, u.nom,
+    cwh.groupe_conflict as groupe_deja_consulte,
+    'ACCES REFUSE' as verdict,
+    'CHINESE WALL - Conflit d''intérêt détecté' as motif
+FROM utilisateurs u
+JOIN chinese_wall_historique cwh ON u.id_utilisateur = cwh.id_utilisateur
+WHERE u.matricule = 'GP001'
+  AND cwh.groupe_conflict = 'GROUPE_INDUS_ALPHA';
 
-- **PostgreSQL 14+**
-- Git (to clone this repo)
+-- Résultat:
+-- GP001 | Leblanc | GROUPE_INDUS_ALPHA | ACCES REFUSE | CHINESE WALL - Conflit d'intérêt détecté
+```
 
-### 2. Load the SQL Schema
+---
+
+### 5️⃣ CAS TEMPORAIRE : Expert accède 30 jours à investigation réglementaire
+
+```sql
+-- Anna Kowalski (ER001, N3) a accès temporaire à INV-REG-2024 (N4)
+SELECT 
+    u.matricule, u.nom, u.prenom,
+    r.reference, r.type_ressource, r.niveau_requis,
+    at.justification,
+    at.date_debut, at.date_fin,
+    EXTRACT(DAY FROM (at.date_fin - NOW())) as jours_restants,
+    at.statut,
+    'AUTORISE (TEMPORAIRE)' as verdict
+FROM utilisateurs u
+JOIN acces_temporaire at ON u.id_utilisateur = at.id_utilisateur
+JOIN ressources r ON at.id_ressource = r.id_ressource
+WHERE u.matricule = 'ER001'
+  AND r.reference = 'INV-REG-2024'
+  AND at.statut = 'ACTIF';
+
+-- Résultat:
+-- ER001 | Kowalski | Anna | INV-REG-2024 | INVESTIGATION | N4 
+-- | Investigation reglementaire ACPR 2024 - expertise droit tunisien requise
+-- | 2026-05-10 | 2026-06-09 | 30 jours | ACTIF | AUTORISE (TEMPORAIRE)
+```
+
+---
+
+### 6️⃣ DASHBOARD : Droits complets d'un utilisateur
+
+```sql
+-- Vue synthétique des droits de Sami Ben Ali
+SELECT 
+    u.matricule,
+    u.nom || ' ' || u.prenom as utilisateur,
+    r.nom_role,
+    p.ressource_type,
+    p.action,
+    p.niveau_min,
+    h.niveau_max,
+    CASE 
+        WHEN h.niveau_max >= p.niveau_min::varchar::niveau_enum THEN 'OK'
+        ELSE 'BLOQUE'
+    END as status
+FROM utilisateurs u
+JOIN blp_habilitations h ON u.id_utilisateur = h.id_utilisateur
+JOIN utilisateur_roles ur ON u.id_utilisateur = ur.id_utilisateur
+JOIN roles r ON ur.id_role = r.id_role
+JOIN role_permissions rp ON r.id_role = rp.id_role
+JOIN permissions p ON rp.id_permission = p.id_permission
+WHERE u.matricule = 'RC001'
+  AND ur.actif = TRUE
+ORDER BY p.ressource_type, p.action;
+
+-- Résultat (8 lignes):
+-- RC001 | Ben Ali Sami | conseiller_particulier | DONNEES_CLIENT | LIRE | N2 | N2 | OK
+-- RC001 | Ben Ali Sami | conseiller_particulier | DONNEES_CLIENT | MODIFIER | N2 | N2 | OK
+-- RC001 | Ben Ali Sami | conseiller_particulier | DOSSIER_KYC | LIRE | N2 | N2 | OK
+-- RC001 | Ben Ali Sami | conseiller_particulier | DOSSIER_KYC | MODIFIER | N3 | N2 | BLOQUE
+-- ...
+```
+
+---
+
+### 7️⃣ DASHBOARD : Refus par modèle de sécurité
+
+```sql
+-- Quels modèles refusent le plus d'accès ?
+SELECT 
+    modele_bloquant,
+    COUNT(*) as nb_refus,
+    COUNT(DISTINCT id_utilisateur) as nb_utilisateurs,
+    MAX(horodatage) as dernier_refus
+FROM journal_audit
+WHERE decision = 'REFUSE'
+GROUP BY modele_bloquant
+ORDER BY nb_refus DESC;
+
+-- Résultat:
+-- modele_bloquant | nb_refus | nb_utilisateurs | dernier_refus
+-- ────────────────┼──────────┼─────────────────┼──────────────
+-- RBAC            | 4        | 3               | 2026-05-10 14:32:15
+-- BLP             | 3        | 2               | 2026-05-10 13:45:22
+-- CW              | 1        | 1               | 2026-05-10 11:00:10
+-- BIBA            | 1        | 1               | 2026-05-10 12:10:45
+```
+
+---
+
+### 8️⃣ DASHBOARD : Accès temporaires actifs et résidus
+
+```sql
+-- Qui a accès temporaire et combien de temps reste-t-il ?
+SELECT 
+    u.matricule,
+    u.nom || ' ' || u.prenom as utilisateur,
+    r.reference as ressource,
+    r.type_ressource,
+    at.justification,
+    EXTRACT(DAY FROM (at.date_fin - NOW())) as jours_restants,
+    EXTRACT(HOUR FROM (at.date_fin - NOW())) % 24 as heures_restantes,
+    at.autorise_par_user,
+    at.statut
+FROM acces_temporaire at
+JOIN utilisateurs u ON at.id_utilisateur = u.id_utilisateur
+JOIN ressources r ON at.id_ressource = r.id_ressource
+WHERE at.statut = 'ACTIF'
+  AND at.date_fin > NOW()
+ORDER BY at.date_fin ASC;
+
+-- Résultat:
+-- ER001 | Kowalski Anna | INV-REG-2024 | INVESTIGATION 
+-- | Investigation reglementaire ACPR 2024... | 30 | 2 | AI002 | ACTIF
+```
+
+---
+
+### 9️⃣ AUDIT : Historique des tentatives d'un utilisateur
+
+```sql
+-- Toutes les tentatives d'accès (succès + refus) de Luc Renard
+SELECT 
+    ja.horodatage,
+    r.reference as ressource,
+    r.type_ressource,
+    ja.action,
+    ja.decision,
+    ja.modele_bloquant,
+    ja.motif_refus,
+    ja.adresse_ip
+FROM journal_audit ja
+LEFT JOIN ressources r ON ja.id_ressource = r.id_ressource
+JOIN utilisateurs u ON ja.id_utilisateur = u.id_utilisateur
+WHERE u.matricule = 'CC001'
+ORDER BY ja.horodatage DESC;
+
+-- Résultat (3 lignes):
+-- 2026-05-10 14:32 | AML-FR-2024-01 | DOSSIER_AML | LIRE | REFUSE | BLP 
+-- | Niveau habilitation insuffisant : N2 < N4 requis | 10.0.1.45
+-- 2026-05-10 14:15 | KPI-2024-Q4 | KPI_COMMERCIAL | LIRE | AUTORISE | NULL
+-- | NULL | 10.0.1.45
+-- 2026-05-10 13:50 | OPERATIONS_COURANTES | LIRE | AUTORISE | NULL
+-- | NULL | 10.0.1.45
+```
+
+---
+
+### 🔟 COMPLIANCE : Conflits Chinese Wall détectés
+
+```sql
+-- Quels utilisateurs ont des restrictions de conflits d'intérêts ?
+SELECT 
+    u.matricule,
+    u.nom || ' ' || u.prenom as utilisateur,
+    cwh.groupe_conflict,
+    r.reference as ressource,
+    cwh.date_consultation,
+    'BLOQUÉ SUR: GROUPE_INDUS_BETA' as restriction
+FROM chinese_wall_historique cwh
+JOIN utilisateurs u ON cwh.id_utilisateur = u.id_utilisateur
+JOIN ressources r ON cwh.id_ressource = r.id_ressource
+WHERE cwh.groupe_conflict IN ('GROUPE_INDUS_ALPHA', 'GROUPE_INDUS_BETA')
+ORDER BY u.matricule;
+
+-- Résultat:
+-- GP001 | Leblanc Sophie | GROUPE_INDUS_ALPHA | PTF-FR-GP01 | 2026-05-10 10:15:32 | BLOQUÉ SUR: GROUPE_INDUS_BETA
+-- RS001 | Lambert Eric | GROUPE_INDUS_ALPHA | RISQUE-Q4-24 | 2026-05-10 10:20:15 | BLOQUÉ SUR: GROUPE_INDUS_BETA
+```
+
+---
+
+## 🚀 Guide d'Installation
+
+### Prérequis
+- PostgreSQL 14+
+- `psql` client
+- Accès de base de données
+
+### Installation
 
 ```bash
-# Clone repository
+# 1. Cloner le repository
 git clone https://github.com/AchrafHasnaoui31/access-controle-system-for-an-internationale-bank-.git
 cd access-controle-system
 
-# Load the schema
-psql -U postgres -d your_database -f "simulation database.txt"
+# 2. Charger le schéma complet
+psql -U postgres -d banque_internationale -f "simulation database.txt"
+
+# 3. Vérifier l'installation
+psql -U postgres -d banque_internationale
 ```
 
-### 3. Verify Installation
+### Vérification Rapide
 
 ```sql
--- Check tables
-\dt
-
--- Verify functions
-\df verifier_*
-
--- Count users
-SELECT COUNT(*) FROM utilisateurs;  -- Should be 20
-
--- Count roles
-SELECT COUNT(*) FROM roles;  -- Should be 24+
-```
-
-### 4. Test Access Control
-
-```sql
--- Test Case 1: Client Advisor reads own client data (AUTHORIZED)
-SELECT * FROM controler_acces(
-    p_id_utilisateur := 1,         -- Sami Ben Ali
-    p_id_ressource := 1,           -- CLI-TN-001
-    p_action := 'LIRE'::action_enum,
-    p_justification := NULL
-);
-
--- Result: AUTORISE, NULL, "Acces accorde - toutes les politiques validees"
-
--- Test Case 2: Commercial Director attempts AML access (DENIED)
-SELECT * FROM controler_acces(
-    p_id_utilisateur := 17,        -- Luc Renard (Commercial)
-    p_id_ressource := 7,           -- AML-FR-2024-01
-    p_action := 'LIRE'::action_enum,
-    p_justification := NULL
-);
-
--- Result: REFUSE, "BLP", "Violation Bell-LaPadula..."
+-- Compte des entités
+SELECT 'niveaux_securite' as table_name, COUNT(*) as count FROM niveaux_securite
+UNION ALL
+SELECT 'pays', COUNT(*) FROM pays
+UNION ALL
+SELECT 'equipes', COUNT(*) FROM equipes
+UNION ALL
+SELECT 'roles', COUNT(*) FROM roles
+UNION ALL
+SELECT 'utilisateurs', COUNT(*) FROM utilisateurs
+UNION ALL
+SELECT 'ressources', COUNT(*) FROM ressources
+UNION ALL
+SELECT 'journal_audit', COUNT(*) FROM journal_audit
+ORDER BY 1;
 ```
 
 ---
 
-## 📊 SQL Views & Queries
+## 💡 Cas d'Usage Réels
 
-### Dashboard Query 1: User Rights Summary
-
-```sql
--- What can each user do?
-SELECT
-    utilisateur,
-    role,
-    ressource_type,
-    action,
-    niveau_requis,
-    niveau_habilite
-FROM v_droits_utilisateur
-WHERE matricule = 'RC001'
-ORDER BY ressource_type, action;
-```
-
-**Output:**
-```
-utilisateur   role                    ressource_type       action    niveau_requis  niveau_habilite
-Sami Ben Ali  conseiller_particulier  DONNEES_CLIENT       LIRE      N2             N2
-Sami Ben Ali  conseiller_particulier  DONNEES_CLIENT       MODIFIER  N2             N2
-Sami Ben Ali  conseiller_particulier  DOSSIER_KYC          LIRE      N2             N2
-...
-```
-
-### Dashboard Query 2: Access Denials by Security Model
+### Cas 1 : Conseiller Tunisien Consulte Client Local ✅
 
 ```sql
--- Which security model is denying access the most?
-SELECT * FROM v_refus_par_modele
-ORDER BY nb_refus DESC;
+-- Sami Ben Ali (RC001, N2, Tunisie) lit CLI-TN-001
+-- Résultat: AUTORISE
+-- - RBAC: Role a permission
+-- - BLP: N2 = N2 ✓
+-- - ABAC: Client en Tunisie ✓
 ```
 
-**Output:**
-```
-modele_bloquant  nb_refus  utilisateurs_concernes  dernier_refus
-RBAC             12        8                       2026-05-10 14:32
-BLP              7         5                       2026-05-10 13:45
-BIBA             3         2                       2026-05-10 12:10
-CW               1         1                       2026-05-10 11:00
-```
-
-### Dashboard Query 3: Active Temporary Access Grants
+### Cas 2 : Directeur Commercial Tente AML ❌
 
 ```sql
--- Who has temporary access and how much time remains?
-SELECT
-    utilisateur,
-    ressource,
-    justification,
-    heures_restantes,
-    autorise_par
-FROM v_acces_temporaires_actifs
-ORDER BY heures_restantes ASC;
+-- Luc Renard (CC001, N2) lit AML-FR-2024-01 (N4)
+-- Résultat: REFUSE - BLP
+-- - BLP: N2 < N4 ✗
 ```
 
-### Dashboard Query 4: Chinese Wall Conflicts
+### Cas 3 : Expert Régional 30j Investigation ⏰
 
 ```sql
--- Which users have conflict-of-interest restrictions?
-SELECT * FROM v_chinese_wall_alertes;
+-- Anna Kowalski (ER001, N3) accès temporaire INV-REG-2024 (N4)
+-- Durée: 30 jours, révocation auto
+-- Résultat: AUTORISE
+```
+
+### Cas 4 : Gestionnaire Patrimoine Bloquée ❌
+
+```sql
+-- Sophie Leblanc consulte PTF-FR-GP01 (GROUPE_INDUS_ALPHA)
+-- Tente accès PTF-TN-GP02 (GROUPE_INDUS_BETA)
+-- Résultat: REFUSE - Chinese Wall
 ```
 
 ---
 
-## 🔧 Customization Guide
+## 🔧 Guide de Personnalisation
 
-### Add a New Team
+### Ajouter une Équipe
 
 ```sql
 INSERT INTO equipes (nom, categorie, effectif_cible, niveau_max, description)
-VALUES ('Compliance Trade', 'CONTROLE', 15, 'N4', 'Trade compliance & KYC');
+VALUES ('Innovation & Digital', 'EXPERTISE', 30, 'N3', 'Transformations IT, données');
 ```
 
-### Add a New Role
+### Ajouter un Rôle
 
 ```sql
 INSERT INTO roles (nom_role, id_equipe, niveau_acces, description)
-VALUES ('compliance_officer_trade', 11, 'N3', 'Trade compliance oversight');
+VALUES ('data_scientist', 11, 'N3', 'Analyses avancées, machine learning');
 ```
 
-### Grant Permissions to a Role
+### Accorder Permission à un Rôle
 
 ```sql
--- Grant 'compliance_officer_trade' permission to read trade contracts
 INSERT INTO role_permissions (id_role, id_permission)
 SELECT 
-    (SELECT id_role FROM roles WHERE nom_role = 'compliance_officer_trade'),
+    (SELECT id_role FROM roles WHERE nom_role = 'data_scientist'),
     id_permission
 FROM permissions
-WHERE ressource_type = 'CONTRAT_CREDIT' AND action = 'LIRE';
+WHERE ressource_type IN ('DONNEES_CLIENT', 'ANALYSE_RISQUE')
+  AND action IN ('LIRE', 'ECRIRE');
 ```
 
-### Assign a User to a Role
+### Attribuer Utilisateur à Rôle
 
 ```sql
 INSERT INTO utilisateur_roles (id_utilisateur, id_role)
 SELECT
-    (SELECT id_utilisateur FROM utilisateurs WHERE matricule = 'CT001'),
-    (SELECT id_role FROM roles WHERE nom_role = 'compliance_officer_trade');
+    (SELECT id_utilisateur FROM utilisateurs WHERE matricule = 'DS001'),
+    (SELECT id_role FROM roles WHERE nom_role = 'data_scientist');
 ```
 
-### Create an ABAC Policy
+### Créer Politique ABAC
 
 ```sql
 INSERT INTO abac_politiques
-  (nom, id_role, type_ressource, filtre_pays, duree_max_heures, heure_debut, heure_fin, jours_semaine, description)
+  (nom, id_role, type_ressource, filtre_pays, duree_max_heures, heure_debut, heure_fin, jours_semaine)
 VALUES
-  ('COMPLIANCE_TRADE_POLICY',
-   (SELECT id_role FROM roles WHERE nom_role = 'compliance_officer_trade'),
-   'CONTRAT_CREDIT',
-   TRUE,   -- Filter by country
-   NULL,   -- No time limit
-   '08:00', '20:00',
-   'LUN-VEN',
-   'Trade compliance: country-filtered, business hours only');
+  ('DATA_SCIENTIST_POLICY',
+   (SELECT id_role FROM roles WHERE nom_role = 'data_scientist'),
+   'ANALYSE_RISQUE',
+   FALSE, NULL,
+   '08:00', '20:00', 'LUN-VEN');
 ```
 
-### Grant Temporary Access
+### Accorder Accès Temporaire
 
 ```sql
 INSERT INTO acces_temporaire
   (id_utilisateur, id_ressource, justification, date_debut, date_fin, autorise_par)
 VALUES
-  ((SELECT id_utilisateur FROM utilisateurs WHERE matricule = 'EX001'),
-   (SELECT id_ressource FROM ressources WHERE reference = 'INV-REG-2024'),
-   'Special investigation project',
+  ((SELECT id_utilisateur FROM utilisateurs WHERE matricule = 'DS001'),
+   (SELECT id_ressource FROM ressources WHERE reference = 'RISQUE-Q4-24'),
+   'Projet analyse prédictive trimestre Q2',
    NOW(),
-   NOW() + INTERVAL '14 days',
+   NOW() + INTERVAL '60 days',
    (SELECT id_utilisateur FROM utilisateurs WHERE matricule = 'AI002'));
 ```
 
-### Revoke a Role
+---
 
-```sql
-UPDATE utilisateur_roles
-SET actif = FALSE, date_fin = CURRENT_DATE
-WHERE id_utilisateur = (SELECT id_utilisateur FROM utilisateurs WHERE matricule = 'EX001')
-  AND id_role = (SELECT id_role FROM roles WHERE nom_role = 'expert_regional');
-```
+## 📈 Considérations Production
+
+### Performance
+- Indexation sur (id_utilisateur, actif) pour rôles
+- Indexation sur (id_role, id_permission)
+- Cache Redis pour permissions fréquentes
+- Prepared statements obligatoires
+
+### Sécurité
+- RLS (Row-Level Security) PostgreSQL
+- Export logs audit → SIEM (Splunk/ELK)
+- Alertes: refus répétés, violations Chinese Wall
+- MFA intégration (Okta/Azure AD)
+
+### Conformité
+- Audit logging COMPLET N3/N4
+- Archivage logs → S3/Glacier
+- Rapports mensuels compliance
+- Traçabilité modifications politiques
 
 ---
 
-## 📈 Production Considerations
-
-### 1. **Scaling Access Control Decisions**
-   - Cache permission lookups in Redis for high-volume systems
-   - Implement request batching for bulk access checks
-   - Use database connection pooling (PgBouncer)
-
-### 2. **Audit & Compliance**
-   - Enable PostgreSQL row-level security (RLS) for additional protection
-   - Implement log archival to cold storage (S3/Glacier)
-   - Generate weekly/monthly compliance reports
-   - Export audit logs to SIEM (Splunk, ELK)
-
-### 3. **MFA Integration**
-   - Connect to enterprise MFA provider (Okta, Azure AD, Duo)
-   - Validate MFA status before N3/N4 resource access
-   - Log MFA challenges to audit trail
-
-### 4. **Monitoring & Alerting**
-   - Alert on repeated access denials from same user
-   - Monitor for suspicious Chinese Wall violations
-   - Track performance of `controler_acces` function
-   - Dashboard: Denials by model, users with highest permissions, policy changes
-
-### 5. **Performance Optimization**
-   - Index on `(id_utilisateur, actif)` for role lookups
-   - Index on `(id_role, id_permission)` for permission checks
-   - Materialize expensive views (v_droits_utilisateur)
-   - Use prepared statements for all queries
-
----
-
-## 📚 References
-
-- **Bell-LaPadula Model**: Confidentiality (no read-up, no write-down)
-- **Biba Model**: Integrity (no write-up)
-- **RBAC**: Role-Based Access Control (Sandhu et al.)
-- **ABAC**: Attribute-Based Access Control (NIST SP 800-162)
-- **Chinese Wall**: Separation of duties (Brewer-Nash Model)
-
----
-
-## 👥 Authors
+## 👥 Auteurs
 
 **Achraf Hasnaoui** & **Mohamed Aziz Foudhaili**
 
-International Bank Access Control System – Sprint 2  
-May 2026
+Système de Contrôle d'Accès — Banque Internationale  
+**Mai 2026**
 
 ---
 
-## 📝 License
-
-This project is provided as-is for educational and enterprise banking compliance purposes.
-
----
-
-## 🤝 Support & Questions
-
-For implementation questions or security audits, review the included:
-- `database structure.html` – Visual ER diagram
-- `simulation database.txt` – Complete SQL schema
-- `Sprint_2_Banque_Internationale_...pdf` – Full technical documentation
-
----
-
-**Last Updated:** May 10, 2026  
-**Database:** PostgreSQL 14+  
-**Status:** ✅ Production-Ready
+**Dernière mise à jour :** 10 mai 2026  
+**SGBD :** PostgreSQL 14+  
+**Status :** ✅ Production-Ready
