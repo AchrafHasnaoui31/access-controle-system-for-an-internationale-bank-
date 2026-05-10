@@ -1,6 +1,6 @@
 # 🏦 Access Control System for an International Bank
 
-A comprehensive, production-ready **access control framework** for international banking operations. This system implements multiple security models (RBAC, BLP, Biba, ABAC, and Chinese Wall) to manage complex user permissions across diverse teams, regulatory zones, and data sensitivity levels.
+A comprehensive, production-ready **access control framework** for international banking operations. This system implements multiple security models (RBAC, BLP, Biba, ABAC, and Chinese Wall) to manage complex, multi-country banking environments with strict regulatory compliance.
 
 ---
 
@@ -21,7 +21,7 @@ A comprehensive, production-ready **access control framework** for international
 
 ## 🎯 Overview
 
-International banks operate in multiple countries with diverse teams (client relations, back-office, wealth management, compliance, audit, legal, etc.) accessing highly sensitive data—client portfolios, KYC records, AML investigations, regulatory reports, and more.
+International banks operate in multiple countries with diverse teams (client relations, back-office, wealth management, compliance, audit, legal, etc.) accessing highly sensitive data—client portfolios, AML files, regulatory investigations, and transaction histories.
 
 This system solves a critical challenge: **How do you grant fine-grained access while maintaining strict data isolation, regulatory compliance, and preventing conflicts of interest?**
 
@@ -106,22 +106,22 @@ This system solves a critical challenge: **How do you grant fine-grained access 
 
 ### Core Tables (16 total)
 
-| Table | Purpose |
-|-------|---------|
-| `utilisateurs` | User master data (matricule, email, team, country) |
-| `roles` | Role definitions (24+ roles across 10 teams) |
-| `permissions` | Granular permissions (resource type + action) |
-| `role_permissions` | Mapping roles to permissions (RBAC) |
-| `utilisateur_roles` | Active role assignments for users |
-| `ressources` | Protected objects (clients, portfolios, investigations) |
-| `blp_habilitations` | Security clearance level per user (BLP) |
-| `abac_politiques` | Context rules (country, portfolio, time windows) |
-| `acces_temporaire` | Time-bounded access grants with auto-revocation |
-| `chinese_wall_historique` | Conflict-of-interest tracking |
-| `journal_audit` | Complete access decision log |
-| `equipes` | Team definitions (10 teams) |
-| `pays` | Countries and regulatory zones |
-| `niveaux_securite` | Security level definitions (N1–N4) |
+| Table | Purpose | Records |
+|-------|---------|---------|
+| `niveaux_securite` | Security level definitions (N1–N4) with MFA requirements | 4 |
+| `pays` | Countries and regulatory zones | 7 |
+| `equipes` | Team definitions (10 operational/control/expertise teams) | 10 |
+| `roles` | Role definitions (24+ roles across all teams) | 24+ |
+| `permissions` | Granular permissions (resource type + action combinations) | 22 |
+| `role_permissions` | RBAC mapping: which roles have which permissions | 70+ |
+| `utilisateurs` | User master data (matricule, email, team, country, MFA status) | 20 |
+| `utilisateur_roles` | Active role assignments for users (with date tracking) | 20+ |
+| `ressources` | Protected objects (clients, portfolios, investigations, AML files) | 15 |
+| `blp_habilitations` | Security clearance level per user (BLP MAC model) | 20 |
+| `abac_politiques` | Context rules (country filters, time windows, duration limits) | 7 |
+| `acces_temporaire` | Time-bounded access grants with automatic revocation | Variable |
+| `chinese_wall_historique` | Conflict-of-interest tracking (groups already accessed) | Variable |
+| `journal_audit` | Complete access decision log (all attempts, denials, reasons) | Variable |
 
 ---
 
@@ -239,6 +239,203 @@ VALUES ('GP_portefeuille_strict', 3, 'PORTEFEUILLE', TRUE, NULL);
 ---
 
 ## 📊 Database Schema
+
+### Detailed Table Specifications
+
+#### **Reference Tables**
+
+**niveaux_securite** - Security Level Definitions
+```sql
+CREATE TABLE niveaux_securite (
+    niveau          niveau_enum PRIMARY KEY,
+    designation     VARCHAR(50),
+    description     TEXT,
+    mfa_requis      BOOLEAN,
+    double_valid    BOOLEAN,
+    journalisation  VARCHAR(20)  -- STANDARD, RENFORCE, COMPLET
+);
+```
+
+**pays** - Countries & Regulatory Zones
+```sql
+CREATE TABLE pays (
+    code_pays       CHAR(2) PRIMARY KEY,  -- ISO 3166-1
+    nom             VARCHAR(100),
+    zone_regulatoire VARCHAR(50)  -- UE, MAGHREB, ASIE, US
+);
+```
+
+**equipes** - Team Definitions
+```sql
+CREATE TABLE equipes (
+    id_equipe       SERIAL PRIMARY KEY,
+    nom             VARCHAR(100) UNIQUE,
+    categorie       VARCHAR(30),  -- OPERATIONNEL, CONTROLE, EXPERTISE, SUPPORT
+    effectif_cible  INT,
+    niveau_max      niveau_enum,
+    description     TEXT
+);
+```
+
+#### **RBAC Tables**
+
+**roles** - Role Definitions
+```sql
+CREATE TABLE roles (
+    id_role         SERIAL PRIMARY KEY,
+    nom_role        VARCHAR(80) UNIQUE,
+    id_equipe       INT REFERENCES equipes,
+    niveau_acces    niveau_enum,
+    description     TEXT
+);
+```
+
+**permissions** - Granular Action Permissions
+```sql
+CREATE TABLE permissions (
+    id_permission   SERIAL PRIMARY KEY,
+    ressource_type  VARCHAR(50),
+    action          action_enum,  -- LIRE, ECRIRE, MODIFIER, SUPPRIMER, VALIDER, EXPORTER
+    niveau_min      niveau_enum,
+    description     TEXT,
+    UNIQUE(ressource_type, action)
+);
+```
+
+**role_permissions** - RBAC Mapping
+```sql
+CREATE TABLE role_permissions (
+    id_role         INT REFERENCES roles,
+    id_permission   INT REFERENCES permissions,
+    PRIMARY KEY (id_role, id_permission)
+);
+```
+
+#### **User & Resource Tables**
+
+**utilisateurs** - User Master Data
+```sql
+CREATE TABLE utilisateurs (
+    id_utilisateur  SERIAL PRIMARY KEY,
+    matricule       VARCHAR(20) UNIQUE,
+    nom             VARCHAR(100),
+    prenom          VARCHAR(100),
+    email           VARCHAR(150) UNIQUE,
+    id_equipe       INT REFERENCES equipes,
+    code_pays       CHAR(2) REFERENCES pays,
+    statut          statut_enum,  -- ACTIF, INACTIF, SUSPENDU, EXPIRE
+    mfa_actif       BOOLEAN DEFAULT FALSE,
+    derniere_cnx    TIMESTAMP,
+    date_creation   TIMESTAMP DEFAULT NOW()
+);
+```
+
+**utilisateur_roles** - User Role Assignments
+```sql
+CREATE TABLE utilisateur_roles (
+    id_utilisateur  INT REFERENCES utilisateurs,
+    id_role         INT REFERENCES roles,
+    date_debut      DATE DEFAULT CURRENT_DATE,
+    date_fin        DATE,  -- NULL = permanent
+    actif           BOOLEAN DEFAULT TRUE,
+    PRIMARY KEY (id_utilisateur, id_role)
+);
+```
+
+**ressources** - Protected Objects
+```sql
+CREATE TABLE ressources (
+    id_ressource    SERIAL PRIMARY KEY,
+    reference       VARCHAR(50) UNIQUE,
+    type_ressource  VARCHAR(50),
+    niveau_requis   niveau_enum,
+    code_pays       CHAR(2) REFERENCES pays,
+    id_proprietaire INT REFERENCES utilisateurs,
+    description     TEXT,
+    actif           BOOLEAN DEFAULT TRUE,
+    date_creation   TIMESTAMP DEFAULT NOW()
+);
+```
+
+#### **MAC (Mandatory Access Control) Tables**
+
+**blp_habilitations** - User Security Clearance
+```sql
+CREATE TABLE blp_habilitations (
+    id_utilisateur  INT PRIMARY KEY REFERENCES utilisateurs,
+    niveau_max      niveau_enum,  -- Maximum clearance level
+    date_attribution DATE,
+    attribue_par    INT REFERENCES utilisateurs,
+    commentaire     TEXT
+);
+```
+
+#### **ABAC & Context Tables**
+
+**abac_politiques** - Contextual Access Policies
+```sql
+CREATE TABLE abac_politiques (
+    id_politique    SERIAL PRIMARY KEY,
+    nom             VARCHAR(100),
+    id_role         INT REFERENCES roles,
+    type_ressource  VARCHAR(50),
+    filtre_pays     BOOLEAN,
+    filtre_portefeuille BOOLEAN,
+    duree_max_heures INT,  -- NULL = no time limit
+    heure_debut     TIME,  -- Business hour start
+    heure_fin       TIME,  -- Business hour end
+    jours_semaine   VARCHAR(20),  -- LUN-VEN, LUN-DIM, etc.
+    description     TEXT
+);
+```
+
+**acces_temporaire** - Time-Bounded Access Grants
+```sql
+CREATE TABLE acces_temporaire (
+    id_acces        SERIAL PRIMARY KEY,
+    id_utilisateur  INT REFERENCES utilisateurs,
+    id_ressource    INT REFERENCES ressources,
+    justification   TEXT NOT NULL,
+    date_debut      TIMESTAMP DEFAULT NOW(),
+    date_fin        TIMESTAMP NOT NULL,
+    autorise_par    INT REFERENCES utilisateurs,
+    statut          statut_enum DEFAULT 'ACTIF',
+    revocation_auto BOOLEAN DEFAULT TRUE,
+    date_revocation TIMESTAMP,
+    CONSTRAINT chk_dates CHECK (date_fin > date_debut)
+);
+```
+
+#### **Conflict & Audit Tables**
+
+**chinese_wall_historique** - Conflict-of-Interest Tracking
+```sql
+CREATE TABLE chinese_wall_historique (
+    id              SERIAL PRIMARY KEY,
+    id_utilisateur  INT REFERENCES utilisateurs,
+    id_ressource    INT REFERENCES ressources,
+    groupe_conflict VARCHAR(50),  -- GROUPE_INDUS_A, GROUPE_INDUS_B, etc.
+    date_consultation TIMESTAMP DEFAULT NOW(),
+    UNIQUE (id_utilisateur, groupe_conflict)
+);
+```
+
+**journal_audit** - Complete Access Decision Log
+```sql
+CREATE TABLE journal_audit (
+    id_journal      BIGSERIAL PRIMARY KEY,
+    id_utilisateur  INT REFERENCES utilisateurs,
+    id_ressource    INT REFERENCES ressources,
+    type_ressource  VARCHAR(50),
+    action          action_enum,
+    decision        decision_enum,  -- AUTORISE, REFUSE, EN_ATTENTE
+    motif_refus     TEXT,  -- Reason if REFUSED
+    modele_bloquant VARCHAR(20),  -- RBAC, ABAC, BLP, BIBA, CW, SYSTEME
+    adresse_ip      INET,
+    horodatage      TIMESTAMP DEFAULT NOW(),
+    justification   TEXT  -- Required for N3/N4
+);
+```
 
 ### Entity Relationship Diagram (Conceptual)
 
