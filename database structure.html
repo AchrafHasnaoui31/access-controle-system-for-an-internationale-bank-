@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Schéma BDD — Contrôle d'Accès Bancaire</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:ital,wght@0,300;0,600;1,300&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0d0f0e;
+    --surface: #141716;
+    --surface2: #1c1f1d;
+    --border: rgba(255,255,255,0.07);
+    --border2: rgba(255,255,255,0.12);
+    --text: #e8e6e0;
+    --muted: #7a7870;
+    --dim: #3a3c3a;
+
+    --n1: #4ade80;  --n1bg: rgba(74,222,128,0.08);
+    --n2: #60a5fa;  --n2bg: rgba(96,165,250,0.08);
+    --n3: #fb923c;  --n3bg: rgba(251,146,60,0.08);
+    --n4: #f87171;  --n4bg: rgba(248,113,113,0.08);
+
+    --rbac: #a78bfa;   --rbac-bg: rgba(167,139,250,0.08);
+    --abac: #38bdf8;   --abac-bg: rgba(56,189,248,0.08);
+    --blp:  #fb923c;   --blp-bg:  rgba(251,146,60,0.08);
+    --biba: #f472b6;   --biba-bg: rgba(244,114,182,0.08);
+    --cw:   #34d399;   --cw-bg:   rgba(52,211,153,0.08);
+    --ref:  #94a3b8;   --ref-bg:  rgba(148,163,184,0.08);
+    --audit:#fbbf24;   --audit-bg:rgba(251,191,36,0.08);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Mono', monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  /* ── Header ── */
+  header {
+    padding: 3rem 3rem 2rem;
+    border-bottom: 1px solid var(--border);
+    position: relative;
+    overflow: hidden;
+  }
+  header::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(ellipse 60% 80% at 80% 50%, rgba(167,139,250,0.04) 0%, transparent 70%),
+      radial-gradient(ellipse 40% 60% at 10% 50%, rgba(96,165,250,0.04) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .header-tag {
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 0.75rem;
+  }
+  header h1 {
+    font-family: 'Fraunces', serif;
+    font-weight: 300;
+    font-size: clamp(1.8rem, 4vw, 2.8rem);
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+    color: var(--text);
+    margin-bottom: 0.5rem;
+  }
+  header h1 em {
+    font-style: italic;
+    color: #a78bfa;
+  }
+  .header-meta {
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 1rem;
+    display: flex;
+    gap: 2rem;
+    flex-wrap: wrap;
+  }
+  .header-meta span { display: flex; align-items: center; gap: 0.4rem; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+
+  /* ── Legend ── */
+  .legend {
+    padding: 1.25rem 3rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .legend-label { color: var(--muted); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; margin-right: 0.25rem; }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .legend-dot {
+    width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0;
+  }
+
+  /* ── Grid ── */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1px;
+    background: var(--border);
+    margin: 0;
+  }
+
+  /* ── Table card ── */
+  .table-card {
+    background: var(--surface);
+    padding: 0;
+    transition: background 0.15s;
+    position: relative;
+    overflow: hidden;
+  }
+  .table-card:hover { background: var(--surface2); }
+
+  .card-header {
+    padding: 1rem 1.25rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  .card-header-left { flex: 1; min-width: 0; }
+  .table-name {
+    font-family: 'DM Mono', monospace;
+    font-weight: 500;
+    font-size: 13px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .table-desc {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+    line-height: 1.4;
+  }
+  .layer-badge {
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 3px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* ── Fields ── */
+  .fields { padding: 0.5rem 0; }
+  .field {
+    display: grid;
+    grid-template-columns: 16px 1fr auto;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.3rem 1.25rem;
+    transition: background 0.1s;
+  }
+  .field:hover { background: rgba(255,255,255,0.025); }
+  .field-icon { font-size: 10px; text-align: center; opacity: 0.7; }
+  .field-name {
+    font-size: 12px;
+    color: #c8c4bc;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .field-name.pk { color: #fbbf24; }
+  .field-name.fk { color: #60a5fa; }
+  .field-type {
+    font-size: 10px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .field-type.enum { color: #a78bfa; }
+
+  /* ── Relations section ── */
+  .relations-section {
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    padding: 2rem 3rem;
+  }
+  .section-title {
+    font-family: 'Fraunces', serif;
+    font-weight: 300;
+    font-size: 1.2rem;
+    color: var(--text);
+    margin-bottom: 1.25rem;
+  }
+  .relations-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 0.5rem;
+  }
+  .relation-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.45rem 0.75rem;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    font-size: 11px;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .relation-row:hover { border-color: var(--border2); background: var(--surface2); }
+  .rel-from { color: #fbbf24; font-weight: 500; }
+  .rel-arrow { color: var(--dim); flex-shrink: 0; }
+  .rel-to { color: #60a5fa; font-weight: 500; }
+  .rel-label { color: var(--muted); margin-left: auto; font-size: 10px; font-style: italic; }
+  .rel-card { color: var(--muted); }
+
+  /* ── Niveau badges in fields ── */
+  .niveau {
+    font-size: 9px; padding: 1px 5px; border-radius: 2px;
+    font-weight: 500; letter-spacing: 0.04em;
+  }
+  .n1 { color: var(--n1); background: var(--n1bg); }
+  .n2 { color: var(--n2); background: var(--n2bg); }
+  .n3 { color: var(--n3); background: var(--n3bg); }
+  .n4 { color: var(--n4); background: var(--n4bg); }
+
+  /* ── Footer ── */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 1.5rem 3rem;
+    color: var(--muted);
+    font-size: 11px;
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  /* Layer color helpers */
+  .layer-ref    { color: var(--ref);   background: var(--ref-bg);   border: 1px solid rgba(148,163,184,0.15); }
+  .layer-rbac   { color: var(--rbac);  background: var(--rbac-bg);  border: 1px solid rgba(167,139,250,0.15); }
+  .layer-blp    { color: var(--blp);   background: var(--blp-bg);   border: 1px solid rgba(251,146,60,0.15);  }
+  .layer-abac   { color: var(--abac);  background: var(--abac-bg);  border: 1px solid rgba(56,189,248,0.15);  }
+  .layer-cw     { color: var(--cw);    background: var(--cw-bg);    border: 1px solid rgba(52,211,153,0.15);  }
+  .layer-audit  { color: var(--audit); background: var(--audit-bg); border: 1px solid rgba(251,191,36,0.15);  }
+
+  .accent-bar {
+    height: 2px;
+    width: 100%;
+    position: absolute;
+    top: 0; left: 0;
+    opacity: 0.6;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-tag">PostgreSQL 14+ · SGBD Bancaire</div>
+  <h1>Schéma de contrôle d'accès<br><em>Banque Internationale</em></h1>
+  <div class="header-meta">
+    <span><span class="dot" style="color:var(--rbac)"></span>14 tables</span>
+    <span><span class="dot" style="color:var(--n1)"></span>5 modèles de sécurité</span>
+    <span><span class="dot" style="color:var(--audit)"></span>RBAC · ABAC · BLP · Biba · Chinese Wall</span>
+    <span><span class="dot" style="color:var(--muted)"></span>Achraf Hasnaoui &amp; Mohamed Aziz Foudhaili</span>
+  </div>
+</header>
+
+<div class="legend">
+  <span class="legend-label">Couche :</span>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--ref)"></div>Référentiel</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--rbac)"></div>RBAC</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--blp)"></div>BLP / Biba</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--abac)"></div>ABAC</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--cw)"></div>Chinese Wall</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--audit)"></div>Audit</div>
+  <div style="margin-left:auto;display:flex;gap:1.2rem;flex-wrap:wrap;">
+    <div class="legend-item">🔑 Clé primaire</div>
+    <div class="legend-item" style="color:#60a5fa">🔗 Clé étrangère</div>
+  </div>
+</div>
+
+<div class="grid">
+
+  <!-- pays -->
+  <div class="table-card">
+    <div class="accent-bar" style="background:var(--ref)"></div>
+    <div class="card-header">
+      <div class="card-header-left">
+        <div class="table-name">pays</div>
+        <div class="table-desc">Référentiel des pays d'opération</div>
+      </div>
+      <div class="layer-badge layer-ref">Référentiel</div>
+    </div>
+    <div class="fields">
+      <div class="field"><span class="field-icon">🔑</span><span class="field-name pk">code_pays</span><span class="field-type">CHAR(2)</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">nom</span><span class="field-type">VARCHAR(100)</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">zone_regulatoire</span><span class="field-type">VARCHAR(50)</span></div>
+    </div>
+  </div>
+
+  <!-- niveaux_securite -->
+  <div class="table-card">
+    <div class="accent-bar" style="background:var(--blp)"></div>
+    <div class="card-header">
+      <div class="card-header-left">
+        <div class="table-name">niveaux_securite</div>
+        <div class="table-desc">Classification N1→N4, règles MFA et journalisation</div>
+      </div>
+      <div class="layer-badge layer-blp">BLP / Biba</div>
+    </div>
+    <div class="fields">
+      <div class="field"><span class="field-icon">🔑</span><span class="field-name pk">niveau</span><span class="field-type enum">niveau_enum</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">designation</span><span class="field-type">VARCHAR(50)</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">mfa_requis</span><span class="field-type">BOOLEAN</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">double_valid</span><span class="field-type">BOOLEAN</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">journalisation</span><span class="field-type">VARCHAR(20)</span></div>
+    </div>
+  </div>
+
+  <!-- equipes -->
+  <div class="table-card">
+    <div class="accent-bar" style="background:var(--ref)"></div>
+    <div class="card-header">
+      <div class="card-header-left">
+        <div class="table-name">equipes</div>
+        <div class="table-desc">Équipes opérationnelles, contrôle, expertise, support</div>
+      </div>
+      <div class="layer-badge layer-ref">Référentiel</div>
+    </div>
+    <div class="fields">
+      <div class="field"><span class="field-icon">🔑</span><span class="field-name pk">id_equipe</span><span class="field-type">SERIAL</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">nom</span><span class="field-type">VARCHAR(100)</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">categorie</span><span class="field-type">VARCHAR(30)</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">effectif_cible</span><span class="field-type">INT</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">niveau_max</span><span class="field-type enum">niveau_enum</span></div>
+    </div>
+  </div>
+
+  <!-- utilisateurs -->
+  <div class="table-card">
+    <div class="accent-bar" style="background:var(--rbac)"></div>
+    <div class="card-header">
+      <div class="card-header-left">
+        <div class="table-name">utilisateurs</div>
+        <div class="table-desc">Identité, équipe, pays, statut, MFA</div>
+      </div>
+      <div class="layer-badge layer-rbac">RBAC</div>
+    </div>
+    <div class="fields">
+      <div class="field"><span class="field-icon">🔑</span><span class="field-name pk">id_utilisateur</span><span class="field-type">SERIAL</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">matricule</span><span class="field-type">VARCHAR(20) UNIQUE</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">nom / prenom</span><span class="field-type">VARCHAR(100)</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">email</span><span class="field-type">VARCHAR(150) UNIQUE</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">id_equipe</span><span class="field-type">INT</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">code_pays</span><span class="field-type">CHAR(2)</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">statut</span><span class="field-type enum">statut_enum</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">mfa_actif</span><span class="field-type">BOOLEAN</span></div>
+    </div>
+  </div>
+
+  <!-- roles -->
+  <div class="table-card">
+    <div class="accent-bar" style="background:var(--rbac)"></div>
+    <div class="card-header">
+      <div class="card-header-left">
+        <div class="table-name">roles</div>
+        <div class="table-desc">25 rôles métier avec niveau d'accès</div>
+      </div>
+      <div class="layer-badge layer-rbac">RBAC</div>
+    </div>
+    <div class="fields">
+      <div class="field"><span class="field-icon">🔑</span><span class="field-name pk">id_role</span><span class="field-type">SERIAL</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">nom_role</span><span class="field-type">VARCHAR(80) UNIQUE</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">id_equipe</span><span class="field-type">INT</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">niveau_acces</span><span class="field-type enum">niveau_enum</span></div>
+    </div>
+  </div>
+
+  <!-- permissions -->
+  <div class="table-card">
+    <div class="accent-bar" style="background:var(--rbac)"></div>
+    <div class="card-header">
+      <div class="card-header-left">
+        <div class="table-name">permissions</div>
+        <div class="table-desc">Granularité ressource × action</div>
+      </div>
+      <div class="layer-badge layer-rbac">RBAC</div>
+    </div>
+    <div class="fields">
+      <div class="field"><span class="field-icon">🔑</span><span class="field-name pk">id_permission</span><span class="field-type">SERIAL</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">ressource_type</span><span class="field-type">VARCHAR(50)</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">action</span><span class="field-type enum">action_enum</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">niveau_min</span><span class="field-type enum">niveau_enum</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">description</span><span class="field-type">TEXT</span></div>
+    </div>
+  </div>
+
+  <!-- role_permissions -->
+  <div class="table-card">
+    <div class="accent-bar" style="background:var(--rbac)"></div>
+    <div class="card-header">
+      <div class="card-header-left">
+        <div class="table-name">role_permissions</div>
+        <div class="table-desc">Table de jonction rôles ↔ permissions</div>
+      </div>
+      <div class="layer-badge layer-rbac">RBAC</div>
+    </div>
+    <div class="fields">
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">id_role</span><span class="field-type">INT (PK, FK)</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">id_permission</span><span class="field-type">INT (PK, FK)</span></div>
+    </div>
+  </div>
+
+  <!-- utilisateur_roles -->
+  <div class="table-card">
+    <div class="accent-bar" style="background:var(--rbac)"></div>
+    <div class="card-header">
+      <div class="card-header-left">
+        <div class="table-name">utilisateur_roles</div>
+        <div class="table-desc">Affectation temporelle des rôles</div>
+      </div>
+      <div class="layer-badge layer-rbac">RBAC</div>
+    </div>
+    <div class="fields">
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">id_utilisateur</span><span class="field-type">INT (PK, FK)</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">id_role</span><span class="field-type">INT (PK, FK)</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">date_debut</span><span class="field-type">DATE</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">date_fin</span><span class="field-type">DATE (NULL=permanent)</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">actif</span><span class="field-type">BOOLEAN</span></div>
+    </div>
+  </div>
+
+  <!-- ressources -->
+  <div class="table-card">
+    <div class="accent-bar" style="background:var(--ref)"></div>
+    <div class="card-header">
+      <div class="card-header-left">
+        <div class="table-name">ressources</div>
+        <div class="table-desc">Objets protégés classifiés N1→N4</div>
+      </div>
+      <div class="layer-badge layer-ref">Référentiel</div>
+    </div>
+    <div class="fields">
+      <div class="field"><span class="field-icon">🔑</span><span class="field-name pk">id_ressource</span><span class="field-type">SERIAL</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">reference</span><span class="field-type">VARCHAR(50) UNIQUE</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">type_ressource</span><span class="field-type">VARCHAR(50)</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">niveau_requis</span><span class="field-type enum">niveau_enum</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">code_pays</span><span class="field-type">CHAR(2)</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">id_proprietaire</span><span class="field-type">INT</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">actif</span><span class="field-type">BOOLEAN</span></div>
+    </div>
+  </div>
+
+  <!-- blp_habilitations -->
+  <div class="table-card">
+    <div class="accent-bar" style="background:var(--blp)"></div>
+    <div class="card-header">
+      <div class="card-header-left">
+        <div class="table-name">blp_habilitations</div>
+        <div class="table-desc">Niveau MAC certifié par utilisateur</div>
+      </div>
+      <div class="layer-badge layer-blp">BLP / Biba</div>
+    </div>
+    <div class="fields">
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">id_utilisateur</span><span class="field-type">INT (PK, FK)</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">niveau_max</span><span class="field-type enum">niveau_enum</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">date_attribution</span><span class="field-type">DATE</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">attribue_par</span><span class="field-type">INT</span></div>
+    </div>
+  </div>
+
+  <!-- abac_politiques -->
+  <div class="table-card">
+    <div class="accent-bar" style="background:var(--abac)"></div>
+    <div class="card-header">
+      <div class="card-header-left">
+        <div class="table-name">abac_politiques</div>
+        <div class="table-desc">Règles contextuelles : pays, horaire, durée</div>
+      </div>
+      <div class="layer-badge layer-abac">ABAC</div>
+    </div>
+    <div class="fields">
+      <div class="field"><span class="field-icon">🔑</span><span class="field-name pk">id_politique</span><span class="field-type">SERIAL</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">nom</span><span class="field-type">VARCHAR(100)</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">id_role</span><span class="field-type">INT</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">type_ressource</span><span class="field-type">VARCHAR(50)</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">filtre_pays</span><span class="field-type">BOOLEAN</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">filtre_portefeuille</span><span class="field-type">BOOLEAN</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">duree_max_heures</span><span class="field-type">INT</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">heure_debut / fin</span><span class="field-type">TIME</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">jours_semaine</span><span class="field-type">VARCHAR(20)</span></div>
+    </div>
+  </div>
+
+  <!-- acces_temporaire -->
+  <div class="table-card">
+    <div class="accent-bar" style="background:var(--abac)"></div>
+    <div class="card-header">
+      <div class="card-header-left">
+        <div class="table-name">acces_temporaire</div>
+        <div class="table-desc">Accès bornés dans le temps avec révocation auto</div>
+      </div>
+      <div class="layer-badge layer-abac">ABAC</div>
+    </div>
+    <div class="fields">
+      <div class="field"><span class="field-icon">🔑</span><span class="field-name pk">id_acces</span><span class="field-type">SERIAL</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">id_utilisateur</span><span class="field-type">INT</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">id_ressource</span><span class="field-type">INT</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">justification</span><span class="field-type">TEXT NOT NULL</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">date_debut / fin</span><span class="field-type">TIMESTAMP</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">autorise_par</span><span class="field-type">INT</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">statut</span><span class="field-type enum">statut_enum</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">revocation_auto</span><span class="field-type">BOOLEAN</span></div>
+    </div>
+  </div>
+
+  <!-- chinese_wall_historique -->
+  <div class="table-card">
+    <div class="accent-bar" style="background:var(--cw)"></div>
+    <div class="card-header">
+      <div class="card-header-left">
+        <div class="table-name">chinese_wall_historique</div>
+        <div class="table-desc">Conflits d'intérêt par groupe consulté</div>
+      </div>
+      <div class="layer-badge layer-cw">Chinese Wall</div>
+    </div>
+    <div class="fields">
+      <div class="field"><span class="field-icon">🔑</span><span class="field-name pk">id</span><span class="field-type">SERIAL</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">id_utilisateur</span><span class="field-type">INT</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">id_ressource</span><span class="field-type">INT</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">groupe_conflict</span><span class="field-type">VARCHAR(50)</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">date_consultation</span><span class="field-type">TIMESTAMP</span></div>
+    </div>
+  </div>
+
+  <!-- journal_audit -->
+  <div class="table-card">
+    <div class="accent-bar" style="background:var(--audit)"></div>
+    <div class="card-header">
+      <div class="card-header-left">
+        <div class="table-name">journal_audit</div>
+        <div class="table-desc">Trace immuable de toutes les décisions d'accès</div>
+      </div>
+      <div class="layer-badge layer-audit">Audit</div>
+    </div>
+    <div class="fields">
+      <div class="field"><span class="field-icon">🔑</span><span class="field-name pk">id_journal</span><span class="field-type">BIGSERIAL</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">id_utilisateur</span><span class="field-type">INT</span></div>
+      <div class="field"><span class="field-icon">🔗</span><span class="field-name fk">id_ressource</span><span class="field-type">INT</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">type_ressource</span><span class="field-type">VARCHAR(50)</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">action</span><span class="field-type enum">action_enum</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">decision</span><span class="field-type enum">decision_enum</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">motif_refus</span><span class="field-type">TEXT</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">modele_bloquant</span><span class="field-type">VARCHAR(20)</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">adresse_ip</span><span class="field-type">INET</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">horodatage</span><span class="field-type">TIMESTAMP</span></div>
+      <div class="field"><span class="field-icon"> </span><span class="field-name">justification</span><span class="field-type">TEXT</span></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Relations -->
+<div class="relations-section">
+  <div class="section-title">Relations principales</div>
+  <div class="relations-grid">
+
+    <div class="relation-row">
+      <span class="rel-from">equipes</span>
+      <span class="rel-arrow">1 ──&lt; N</span>
+      <span class="rel-to">utilisateurs</span>
+      <span class="rel-label">appartient à</span>
+    </div>
+    <div class="relation-row">
+      <span class="rel-from">equipes</span>
+      <span class="rel-arrow">1 ──&lt; N</span>
+      <span class="rel-to">roles</span>
+      <span class="rel-label">regroupe</span>
+    </div>
+    <div class="relation-row">
+      <span class="rel-from">pays</span>
+      <span class="rel-arrow">1 ──&lt; N</span>
+      <span class="rel-to">utilisateurs</span>
+      <span class="rel-label">localise</span>
+    </div>
+    <div class="relation-row">
+      <span class="rel-from">pays</span>
+      <span class="rel-arrow">1 ──&lt; N</span>
+      <span class="rel-to">ressources</span>
+      <span class="rel-label">localise</span>
+    </div>
+    <div class="relation-row">
+      <span class="rel-from">niveaux_securite</span>
+      <span class="rel-arrow">1 ──&lt; N</span>
+      <span class="rel-to">equipes</span>
+      <span class="rel-label">plafonne</span>
+    </div>
+    <div class="relation-row">
+      <span class="rel-from">niveaux_securite</span>
+      <span class="rel-arrow">1 ──&lt; N</span>
+      <span class="rel-to">ressources</span>
+      <span class="rel-label">niveau requis</span>
+    </div>
+    <div class="relation-row">
+      <span class="rel-from">niveaux_securite</span>
+      <span class="rel-arrow">1 ──1</span>
+      <span class="rel-to">blp_habilitations</span>
+      <span class="rel-label">niveau max</span>
+    </div>
+    <div class="relation-row">
+      <span class="rel-from">roles</span>
+      <span class="rel-arrow">N ──M</span>
+      <span class="rel-to">permissions</span>
+      <span class="rel-label">via role_permissions</span>
+    </div>
+    <div class="relation-row">
+      <span class="rel-from">utilisateurs</span>
+      <span class="rel-arrow">N ──M</span>
+      <span class="rel-to">roles</span>
+      <span class="rel-label">via utilisateur_roles</span>
+    </div>
+    <div class="relation-row">
+      <span class="rel-from">utilisateurs</span>
+      <span class="rel-arrow">1 ──1</span>
+      <span class="rel-to">blp_habilitations</span>
+      <span class="rel-label">habilitation MAC</span>
+    </div>
+    <div class="relation-row">
+      <span class="rel-from">roles</span>
+      <span class="rel-arrow">1 ──&lt; N</span>
+      <span class="rel-to">abac_politiques</span>
+      <span class="rel-label">gouverne</span>
+    </div>
+    <div class="relation-row">
+      <span class="rel-from">utilisateurs</span>
+      <span class="rel-arrow">1 ──&lt; N</span>
+      <span class="rel-to">acces_temporaire</span>
+      <span class="rel-label">bénéficie de</span>
+    </div>
+    <div class="relation-row">
+      <span class="rel-from">ressources</span>
+      <span class="rel-arrow">1 ──&lt; N</span>
+      <span class="rel-to">acces_temporaire</span>
+      <span class="rel-label">protège</span>
+    </div>
+    <div class="relation-row">
+      <span class="rel-from">utilisateurs</span>
+      <span class="rel-arrow">1 ──&lt; N</span>
+      <span class="rel-to">chinese_wall_historique</span>
+      <span class="rel-label">enregistre</span>
+    </div>
+    <div class="relation-row">
+      <span class="rel-from">utilisateurs</span>
+      <span class="rel-arrow">1 ──&lt; N</span>
+      <span class="rel-to">journal_audit</span>
+      <span class="rel-label">génère</span>
+    </div>
+    <div class="relation-row">
+      <span class="rel-from">ressources</span>
+      <span class="rel-arrow">1 ──&lt; N</span>
+      <span class="rel-to">journal_audit</span>
+      <span class="rel-label">concerne</span>
+    </div>
+
+  </div>
+</div>
+
+<!-- Enums -->
+<div class="relations-section" style="border-top:1px solid var(--border)">
+  <div class="section-title">Types énumérés</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:1rem;">
+
+    <div style="border:1px solid var(--border);border-radius:6px;overflow:hidden;">
+      <div style="padding:0.6rem 1rem;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;">niveau_enum</div>
+      <div style="padding:0.5rem 1rem;display:flex;gap:0.5rem;flex-wrap:wrap;">
+        <span class="niveau n1">N1</span>
+        <span class="niveau n2">N2</span>
+        <span class="niveau n3">N3</span>
+        <span class="niveau n4">N4</span>
+      </div>
+    </div>
+
+    <div style="border:1px solid var(--border);border-radius:6px;overflow:hidden;">
+      <div style="padding:0.6rem 1rem;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;">action_enum</div>
+      <div style="padding:0.5rem 1rem;font-size:11px;color:#c8c4bc;line-height:1.8;">
+        LIRE · ECRIRE · MODIFIER<br>SUPPRIMER · VALIDER · EXPORTER
+      </div>
+    </div>
+
+    <div style="border:1px solid var(--border);border-radius:6px;overflow:hidden;">
+      <div style="padding:0.6rem 1rem;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;">decision_enum</div>
+      <div style="padding:0.5rem 1rem;font-size:11px;color:#c8c4bc;line-height:1.8;">
+        AUTORISE · REFUSE · EN_ATTENTE
+      </div>
+    </div>
+
+    <div style="border:1px solid var(--border);border-radius:6px;overflow:hidden;">
+      <div style="padding:0.6rem 1rem;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);letter-spacing:0.06em;text-transform:uppercase;">statut_enum</div>
+      <div style="padding:0.5rem 1rem;font-size:11px;color:#c8c4bc;line-height:1.8;">
+        ACTIF · INACTIF · SUSPENDU · EXPIRE
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<footer>
+  <span>Système de contrôle d'accès — Banque Internationale</span>
+  <span>PostgreSQL 14+ · 14 tables · 5 modèles de sécurité</span>
+</footer>
+
+</body>
+</html>

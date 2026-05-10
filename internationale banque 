@@ -1,0 +1,21 @@
+Banque internationale
+Une banque internationale est présente dans plusieurs pays et opère à la fois dans la banque de détail,
+la banque d&#39;investissement, la gestion de patrimoine et les activités de conformité réglementaire. Sa
+base de données regroupe les informations sur les clients particuliers et entreprises, les portefeuilles,
+les ordres de marché, les contrats de crédit, les dossiers de connaissance client, les alertes de fraude,
+les investigations internes et les échanges avec les autorités de régulation. Les utilisateurs
+appartiennent à des métiers très différents : relation clientèle, back-office, analystes risques, cellule
+anti-blanchiment, conformité, audit interne et équipes juridiques. Le système doit donc gérer une très
+forte hétérogénéité des usages et des niveaux de sensibilité.
+Un employé du back-office doit pouvoir traiter des opérations et corriger certaines anomalies
+administratives, sans pour autant avoir accès aux analyses de risque stratégique ou aux enquêtes
+réglementaires en cours. Les conseillers en gestion de patrimoine doivent consulter des données
+financières détaillées sur leurs clients, mais uniquement sur les portefeuilles qui leur sont confiés et
+dans le respect du pays de rattachement du client. Les équipes conformité, quant à elles, manipulent
+des dossiers particulièrement sensibles liés aux soupçons de blanchiment, aux sanctions
+internationales ou aux incidents majeurs de sécurité, et ces dossiers doivent rester isolés même par
+rapport à des cadres ayant une forte responsabilité commerciale. Des experts régionaux peuvent
+parfois être appelés pour une investigation ponctuelle, ce qui suppose de leur ouvrir un accès
+temporaire à un sous-ensemble d&#39;informations. Ce scénario aide les étudiants à penser les séparations
+entre métiers bancaires, la territorialité des données, les accès exceptionnels encadrés, les obligations
+réglementaires et la hiérarchie entre besoin métier et confidentialité extrême.
