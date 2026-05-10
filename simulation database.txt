@@ -1029,4 +1029,234 @@ $$ LANGUAGE plpgsql;
 -- SELECT * FROM v_refus_par_modele;
 
 -- Test 8 : Acces temporaires actifs
--- SELECT * FROM v_acces_temporaires_actifs;
+-- SELECT * FROM v_acces_temporaires_actifs;-- =============================================================
+--  AJOUT : ROLE GUICHETIER_RESPONSABLE
+--  Banque Internationale -- Service Guichet / Front Desk
+--  Auteur : mise à jour du système de contrôle d'accès
+-- =============================================================
+
+-- -------------------------------------------------------------
+-- SECTION A : NOUVEAU RÔLE -- guichetier_responsable
+-- (Equipe 1 = Relation clientèle)
+-- -------------------------------------------------------------
+
+-- A.1  Ajout du rôle dans la table roles
+INSERT INTO roles (nom_role, id_equipe, niveau_acces, description) VALUES
+('guichetier_responsable', 1, 'N2',
+ 'Responsable du service guichet : accueil physique, opérations courantes clients, '
+ 'validation des transactions guichet, supervision des guichetiers ordinaires, '
+ 'gestion des files d''attente et des situations exceptionnelles au comptoir.');
+
+
+-- A.2  Nouvelles permissions spécifiques au guichet
+--      (ajout dans la table permissions si elles n''existent pas déjà)
+
+INSERT INTO permissions (ressource_type, action, niveau_min, description)
+VALUES
+  ('OPERATIONS_GUICHET', 'LIRE',      'N1',
+   'Consulter la file d''attente et les opérations guichet en cours'),
+  ('OPERATIONS_GUICHET', 'ECRIRE',    'N1',
+   'Enregistrer une opération réalisée au guichet (dépôt, retrait, change...)'),
+  ('OPERATIONS_GUICHET', 'VALIDER',   'N2',
+   'Valider ou rejeter une opération guichet (supervisor guichet uniquement)'),
+  ('OPERATIONS_GUICHET', 'MODIFIER',  'N2',
+   'Corriger une opération guichet avant clôture journalière')
+ON CONFLICT (ressource_type, action) DO NOTHING;
+
+
+-- A.3  Association rôle <-> permissions
+--      Le guichetier_responsable hérite des permissions de base (clientèle)
+--      + les nouvelles permissions guichet + la validation
+
+INSERT INTO role_permissions
+  SELECT r.id_role, p.id_permission
+  FROM roles r, permissions p
+  WHERE r.nom_role = 'guichetier_responsable'
+    AND (
+      -- Opérations clients de base
+      (p.ressource_type IN ('DONNEES_CLIENT', 'DOSSIER_KYC', 'OPERATIONS_COURANTES')
+       AND p.action IN ('LIRE', 'ECRIRE', 'VALIDER'))
+      OR
+      -- Contrats crédit : lecture uniquement (contexte guichet)
+      (p.ressource_type = 'CONTRAT_CREDIT'
+       AND p.action = 'LIRE')
+      OR
+      -- KPI commerciaux : lecture pour suivi performance guichet
+      (p.ressource_type = 'KPI_COMMERCIAL'
+       AND p.action = 'LIRE')
+      OR
+      -- Journal d''audit : écriture système (traçabilité guichet)
+      (p.ressource_type = 'JOURNAL_AUDIT'
+       AND p.action = 'ECRIRE')
+      OR
+      -- Toutes les permissions OPERATIONS_GUICHET
+      p.ressource_type = 'OPERATIONS_GUICHET'
+    )
+ON CONFLICT DO NOTHING;
+
+
+-- -------------------------------------------------------------
+-- SECTION B : NOUVEAUX UTILISATEURS guichetier_responsable
+-- -------------------------------------------------------------
+
+INSERT INTO utilisateurs
+  (matricule, nom, prenom, email, id_equipe, code_pays, mfa_actif)
+VALUES
+  ('GR001', 'Gharbi',   'Mehdi',   'mehdi.gharbi@banque.tn',   1, 'TN', FALSE),
+  ('GR002', 'Leroux',   'Isabelle','isabelle.leroux@banque.fr', 1, 'FR', FALSE),
+  ('GR003', 'El Amri',  'Faycal',  'faycal.elamri@banque.ma',  1, 'MA', FALSE);
+
+
+-- -------------------------------------------------------------
+-- SECTION C : HABILITATIONS BLP (niveau N2 -- Sensible)
+-- -------------------------------------------------------------
+
+INSERT INTO blp_habilitations (id_utilisateur, niveau_max, attribue_par, commentaire)
+SELECT
+    u.id_utilisateur,
+    'N2',
+    (SELECT id_utilisateur FROM utilisateurs WHERE matricule = 'AI002'),
+    'Habilitation N2 -- Responsable guichet, accès données clients sensibles'
+FROM utilisateurs u
+WHERE u.matricule IN ('GR001','GR002','GR003')
+ON CONFLICT (id_utilisateur) DO NOTHING;
+
+
+-- -------------------------------------------------------------
+-- SECTION D : ATTRIBUTION DU RÔLE AUX NOUVEAUX UTILISATEURS
+-- -------------------------------------------------------------
+
+INSERT INTO utilisateur_roles (id_utilisateur, id_role)
+SELECT
+    u.id_utilisateur,
+    r.id_role
+FROM utilisateurs u, roles r
+WHERE u.matricule IN ('GR001','GR002','GR003')
+  AND r.nom_role = 'guichetier_responsable'
+ON CONFLICT DO NOTHING;
+
+
+-- -------------------------------------------------------------
+-- SECTION E : NOUVELLE RESSOURCE -- opérations guichet
+-- -------------------------------------------------------------
+
+INSERT INTO ressources
+  (reference, type_ressource, niveau_requis, code_pays, id_proprietaire, description)
+VALUES
+  ('GUICHET-TN-2024',
+   'OPERATIONS_GUICHET', 'N1', 'TN',
+   (SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR001'),
+   'Journal des opérations guichet -- agence Tunisie 2024'),
+  ('GUICHET-FR-2024',
+   'OPERATIONS_GUICHET', 'N1', 'FR',
+   (SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR002'),
+   'Journal des opérations guichet -- agence France 2024'),
+  ('GUICHET-MA-2024',
+   'OPERATIONS_GUICHET', 'N1', 'MA',
+   (SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR003'),
+   'Journal des opérations guichet -- agence Maroc 2024');
+
+
+-- -------------------------------------------------------------
+-- SECTION F : POLITIQUE ABAC -- guichetier_responsable
+-- -------------------------------------------------------------
+
+INSERT INTO abac_politiques
+  (nom, id_role, type_ressource,
+   filtre_pays, filtre_portefeuille, duree_max_heures,
+   heure_debut, heure_fin, jours_semaine, description)
+VALUES
+-- F.1  Accès clients : filtré par pays de l''agence, heures d''ouverture
+('GUICHET_resp_clients',
+  (SELECT id_role FROM roles WHERE nom_role='guichetier_responsable'),
+  'DONNEES_CLIENT',
+  TRUE, FALSE, NULL,
+  '07:30', '18:30', 'LUN-SAM',
+  'Responsable guichet : accès aux données clients de son pays uniquement, '
+  'pendant les heures d''ouverture (lun–sam 7h30–18h30)'),
+
+-- F.2  Opérations guichet : accès étendu pour gestion des fins de journée
+('GUICHET_resp_operations',
+  (SELECT id_role FROM roles WHERE nom_role='guichetier_responsable'),
+  'OPERATIONS_GUICHET',
+  TRUE, FALSE, NULL,
+  '07:00', '19:30', 'LUN-SAM',
+  'Responsable guichet : gestion et validation des opérations guichet de son agence, '
+  'clôture de caisse incluse (7h00–19h30)'),
+
+-- F.3  Situations exceptionnelles : accès urgence limité (ex : incident caisse)
+('GUICHET_resp_urgence',
+  (SELECT id_role FROM roles WHERE nom_role='guichetier_responsable'),
+  'OPERATIONS_COURANTES',
+  TRUE, FALSE, 4,
+  '00:00', '23:59', 'LUN-DIM',
+  'Accès exceptionnel 24/7 limité à 4h pour incidents guichet critiques -- '
+  'justification obligatoire et traçabilité renforcée');
+
+
+-- -------------------------------------------------------------
+-- SECTION G : ENTRÉES DE DÉMONSTRATION DANS LE JOURNAL D''AUDIT
+-- -------------------------------------------------------------
+
+INSERT INTO journal_audit
+  (id_utilisateur, id_ressource, type_ressource, action, decision,
+   motif_refus, modele_bloquant, adresse_ip, justification)
+VALUES
+-- G.1  Guichetier responsable valide une opération guichet (autorisé)
+((SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR001'),
+  (SELECT id_ressource FROM ressources WHERE reference='GUICHET-TN-2024'),
+  'OPERATIONS_GUICHET', 'VALIDER', 'AUTORISE',
+  NULL, NULL, '196.20.5.21',
+  'Validation clôture de caisse journée -- agence Tunis Centre'),
+
+-- G.2  Guichetier responsable lit un dossier client (autorisé)
+((SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR001'),
+  (SELECT id_ressource FROM ressources WHERE reference='CLI-TN-001'),
+  'DONNEES_CLIENT', 'LIRE', 'AUTORISE',
+  NULL, NULL, '196.20.5.21', NULL),
+
+-- G.3  Guichetier responsable tente de lire un dossier AML (refusé BLP)
+((SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR002'),
+  (SELECT id_ressource FROM ressources WHERE reference='AML-FR-2024-01'),
+  'DOSSIER_AML', 'LIRE', 'REFUSE',
+  'Niveau habilitation insuffisant : N2 < N4 requis', 'BLP',
+  '10.0.8.33', NULL),
+
+-- G.4  Guichetier responsable tente de modifier un portefeuille GP (refusé RBAC)
+((SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR002'),
+  (SELECT id_ressource FROM ressources WHERE reference='PTF-FR-GP01'),
+  'PORTEFEUILLE', 'MODIFIER', 'REFUSE',
+  'Role guichetier_responsable non autorisé sur PORTEFEUILLE/MODIFIER', 'RBAC',
+  '10.0.8.33', NULL);
+
+
+-- =============================================================
+--  REQUÊTES DE VALIDATION DU RÔLE guichetier_responsable
+-- =============================================================
+
+-- Test G-1 : Droits effectifs du guichetier responsable GR001
+-- SELECT * FROM v_droits_utilisateur WHERE matricule = 'GR001';
+
+-- Test G-2 : Guichetier responsable valide une opération guichet
+-- SELECT * FROM controler_acces(
+--     (SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR001'),
+--     (SELECT id_ressource FROM ressources WHERE reference='GUICHET-TN-2024'),
+--     'VALIDER', NULL
+-- );
+-- Résultat attendu : AUTORISE
+
+-- Test G-3 : Guichetier responsable tente de lire un dossier AML (interdit BLP)
+-- SELECT * FROM controler_acces(
+--     (SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR001'),
+--     (SELECT id_ressource FROM ressources WHERE reference='AML-TN-2024-01'),
+--     'LIRE', NULL
+-- );
+-- Résultat attendu : REFUSE / BLP
+
+-- Test G-4 : Guichetier responsable lit les données d'un client
+-- SELECT * FROM controler_acces(
+--     (SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR001'),
+--     (SELECT id_ressource FROM ressources WHERE reference='CLI-TN-001'),
+--     'LIRE', NULL
+-- );
+-- Résultat attendu : AUTORISE
