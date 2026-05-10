@@ -1,15 +1,42 @@
--- =============================================================
---  SYSTEME DE CONTROLE D'ACCES -- BANQUE INTERNATIONALE
---  Modeles : RBAC + ABAC + BLP + Biba + Chinese Wall
---  SGBD    : PostgreSQL 14+
+-- ==============================================================
+--  BANQUE INTERNATIONALE — SYSTÈME DE CONTRÔLE D'ACCÈS COMPLET
+--  Modèles : RBAC + BLP + Biba + ABAC + Chinese Wall
+--  + Rôles PostgreSQL + GRANT + Attribution automatique
+--  SGBD : PostgreSQL 14+
 --  Auteurs : Achraf Hasnaoui & Mohamed Aziz Foudhaili
--- =============================================================
+--  Étendu  : correction bugs + grants + fonctions automatiques
+-- ==============================================================
 
--- -------------------------------------------------------------
--- 0. EXTENSIONS ET NETTOYAGE
--- -------------------------------------------------------------
--- CREATE EXTENSION IF NOT EXISTS pgcrypto;  -- pour gen_random_uuid()
+-- ==============================================================
+-- PARTIE 0 : NETTOYAGE COMPLET (ré-exécution idempotente)
+-- ==============================================================
 
+-- 0.1  Supprimer les triggers d'abord
+DROP TRIGGER IF EXISTS trg_auto_attribution   ON utilisateurs;
+DROP TRIGGER IF EXISTS trg_revocation_auto    ON acces_temporaire;
+
+-- 0.2  Supprimer les fonctions
+DROP FUNCTION IF EXISTS attribuer_acces_utilisateur(VARCHAR, VARCHAR)  CASCADE;
+DROP FUNCTION IF EXISTS revoquer_acces_utilisateur(VARCHAR, TEXT, VARCHAR) CASCADE;
+DROP FUNCTION IF EXISTS accorder_acces_temporaire(VARCHAR, VARCHAR, INT, TEXT, VARCHAR) CASCADE;
+DROP FUNCTION IF EXISTS trigger_auto_attribution()  CASCADE;
+DROP FUNCTION IF EXISTS trigger_revocation_auto()   CASCADE;
+DROP FUNCTION IF EXISTS trigger_journal_acces()     CASCADE;
+DROP FUNCTION IF EXISTS controler_acces(INT, INT, action_enum, TEXT) CASCADE;
+DROP FUNCTION IF EXISTS verifier_rbac(INT, VARCHAR, action_enum)     CASCADE;
+DROP FUNCTION IF EXISTS verifier_blp(INT, niveau_enum, action_enum)  CASCADE;
+DROP FUNCTION IF EXISTS verifier_biba(INT, niveau_enum, action_enum) CASCADE;
+DROP FUNCTION IF EXISTS verifier_abac(INT, INT, action_enum)         CASCADE;
+DROP FUNCTION IF EXISTS verifier_chinese_wall(INT, INT)              CASCADE;
+DROP FUNCTION IF EXISTS current_user_id()                            CASCADE;
+
+-- 0.3  Supprimer les vues
+DROP VIEW IF EXISTS v_droits_utilisateur      CASCADE;
+DROP VIEW IF EXISTS v_refus_par_modele        CASCADE;
+DROP VIEW IF EXISTS v_acces_temporaires_actifs CASCADE;
+DROP VIEW IF EXISTS v_chinese_wall_alertes    CASCADE;
+
+-- 0.4  Supprimer les tables (ordre des dépendances)
 DROP TABLE IF EXISTS chinese_wall_historique  CASCADE;
 DROP TABLE IF EXISTS acces_temporaire         CASCADE;
 DROP TABLE IF EXISTS journal_audit            CASCADE;
@@ -26,15 +53,29 @@ DROP TABLE IF EXISTS equipes                  CASCADE;
 DROP TABLE IF EXISTS niveaux_securite         CASCADE;
 DROP TABLE IF EXISTS pays                     CASCADE;
 
-DROP TYPE IF EXISTS niveau_enum      CASCADE;
-DROP TYPE IF EXISTS action_enum      CASCADE;
-DROP TYPE IF EXISTS decision_enum    CASCADE;
-DROP TYPE IF EXISTS statut_enum      CASCADE;
+-- 0.5  Supprimer les types
+DROP TYPE IF EXISTS niveau_enum   CASCADE;
+DROP TYPE IF EXISTS action_enum   CASCADE;
+DROP TYPE IF EXISTS decision_enum CASCADE;
+DROP TYPE IF EXISTS statut_enum   CASCADE;
+
+-- 0.6  Supprimer les rôles PostgreSQL (nettoyage complet)
+DO $$
+DECLARE r RECORD;
+BEGIN
+    FOR r IN
+        SELECT rolname FROM pg_roles
+        WHERE rolname LIKE 'banque_%'
+    LOOP
+        EXECUTE 'DROP ROLE IF EXISTS ' || quote_ident(r.rolname);
+    END LOOP;
+END;
+$$;
 
 
--- -------------------------------------------------------------
--- 1. TYPES ENUMERES
--- -------------------------------------------------------------
+-- ==============================================================
+-- PARTIE 1 : TYPES ÉNUMÉRÉS
+-- ==============================================================
 
 CREATE TYPE niveau_enum   AS ENUM ('N1','N2','N3','N4');
 CREATE TYPE action_enum   AS ENUM ('LIRE','ECRIRE','MODIFIER','SUPPRIMER','VALIDER','EXPORTER');
@@ -42,11 +83,11 @@ CREATE TYPE decision_enum AS ENUM ('AUTORISE','REFUSE','EN_ATTENTE');
 CREATE TYPE statut_enum   AS ENUM ('ACTIF','INACTIF','SUSPENDU','EXPIRE');
 
 
--- -------------------------------------------------------------
--- 2. TABLES DE REFERENCE
--- -------------------------------------------------------------
+-- ==============================================================
+-- PARTIE 2 : TABLES DE RÉFÉRENCE
+-- ==============================================================
 
--- 2.1  Niveaux de securite (BLP / Biba)
+-- 2.1  Niveaux de sécurité (BLP / Biba)
 CREATE TABLE niveaux_securite (
     niveau          niveau_enum     PRIMARY KEY,
     designation     VARCHAR(50)     NOT NULL,
@@ -72,11 +113,11 @@ INSERT INTO niveaux_securite VALUES
  TRUE,  TRUE,  'COMPLET');
 
 
--- 2.2  Pays d'operation
+-- 2.2  Pays d'opération
 CREATE TABLE pays (
-    code_pays       CHAR(2)         PRIMARY KEY,  -- ISO 3166-1 alpha-2
-    nom             VARCHAR(100)    NOT NULL,
-    zone_regulatoire VARCHAR(50)    NOT NULL       -- ex: 'UE', 'MAGHREB', 'ASIE'
+    code_pays        CHAR(2)         PRIMARY KEY,
+    nom              VARCHAR(100)    NOT NULL,
+    zone_regulatoire VARCHAR(50)     NOT NULL
 );
 
 INSERT INTO pays VALUES
@@ -89,136 +130,141 @@ INSERT INTO pays VALUES
 ('MA','Maroc',      'MAGHREB');
 
 
--- 2.3  Equipes
+-- 2.3  Équipes
 CREATE TABLE equipes (
     id_equipe       SERIAL          PRIMARY KEY,
     nom             VARCHAR(100)    NOT NULL UNIQUE,
     categorie       VARCHAR(30)     NOT NULL
                     CHECK (categorie IN ('OPERATIONNEL','CONTROLE','EXPERTISE','SUPPORT')),
     effectif_cible  INT             NOT NULL,
-    niveau_max      niveau_enum     NOT NULL,  -- plafond BLP pour cette equipe
+    niveau_max      niveau_enum     NOT NULL,
     description     TEXT
 );
 
 INSERT INTO equipes (nom, categorie, effectif_cible, niveau_max, description) VALUES
-('Relation clientele',     'OPERATIONNEL', 120, 'N2',
+('Relation clientele',    'OPERATIONNEL', 120, 'N2',
  'Premier contact client, operations courantes, KYC de base.'),
-('Back-office',            'OPERATIONNEL',  80, 'N2',
+('Back-office',           'OPERATIONNEL',  80, 'N2',
  'Traitement des operations, rapprochements, corrections administratives.'),
-('Gestion de patrimoine',  'OPERATIONNEL',  60, 'N3',
+('Gestion de patrimoine', 'OPERATIONNEL',  60, 'N3',
  'Portefeuilles clients haute valeur, ordres de marche, strategies.'),
-('Risque',                 'OPERATIONNEL',  40, 'N3',
+('Risque',                'OPERATIONNEL',  40, 'N3',
  'Analyse risque credit/marche/operationnel, reporting Bale III.'),
-('Conformite / AML',       'CONTROLE',      35, 'N4',
+('Conformite / AML',      'CONTROLE',      35, 'N4',
  'Alertes fraude, sanctions OFAC/ONU/UE, declarations TRACFIN.'),
-('Audit interne',          'CONTROLE',      20, 'N4',
+('Audit interne',         'CONTROLE',      20, 'N4',
  'Controle independant, verification des habilitations, rapports CA.'),
-('Juridique',              'CONTROLE',      20, 'N4',
+('Juridique',             'CONTROLE',      20, 'N4',
  'Contentieux, echanges regulateurs, validation operations complexes.'),
-('Cadres commerciaux',     'EXPERTISE',     25, 'N2',
+('Cadres commerciaux',    'EXPERTISE',     25, 'N2',
  'Pilotage commercial, KPIs agreges, validation operations hors norme.'),
-('Experts regionaux',      'EXPERTISE',     10, 'N3',
+('Experts regionaux',     'EXPERTISE',     10, 'N3',
  'Investigations ponctuelles, expertise locale, acces temporaire borne.'),
-('Support',                'SUPPORT',       90, 'N1',
+('Support',               'SUPPORT',       90, 'N1',
  'IT, RH, finance interne, logistique.');
 
 
--- -------------------------------------------------------------
--- 3. RBAC : ROLES ET PERMISSIONS
--- -------------------------------------------------------------
+-- ==============================================================
+-- PARTIE 3 : RBAC — RÔLES ET PERMISSIONS
+-- ==============================================================
 
--- 3.1  Roles
+-- 3.1  Rôles métier
 CREATE TABLE roles (
-    id_role         SERIAL          PRIMARY KEY,
-    nom_role        VARCHAR(80)     NOT NULL UNIQUE,
-    id_equipe       INT             NOT NULL REFERENCES equipes(id_equipe),
-    niveau_acces    niveau_enum     NOT NULL,
-    description     TEXT
+    id_role      SERIAL        PRIMARY KEY,
+    nom_role     VARCHAR(80)   NOT NULL UNIQUE,
+    id_equipe    INT           NOT NULL REFERENCES equipes(id_equipe),
+    niveau_acces niveau_enum   NOT NULL,
+    description  TEXT
 );
 
 INSERT INTO roles (nom_role, id_equipe, niveau_acces, description) VALUES
--- Relation clientele
-('conseiller_particulier',    1, 'N2', 'Gestion clients particuliers, operations courantes'),
-('conseiller_entreprise',     1, 'N2', 'Gestion clients entreprises, credits'),
-('responsable_agence',        1, 'N2', 'Supervision equipe RC, validation operations RC'),
+-- Relation clientèle
+('conseiller_particulier',   1, 'N2', 'Gestion clients particuliers, operations courantes'),
+('conseiller_entreprise',    1, 'N2', 'Gestion clients entreprises, credits'),
+('responsable_agence',       1, 'N2', 'Supervision equipe RC, validation operations RC'),
+('guichetier_responsable',   1, 'N2', 'Responsable service guichet, validation transactions guichet'),
 -- Back-office
-('operateur_bo',              2, 'N1', 'Traitement operations, saisie et validation de base'),
-('superviseur_bo',            2, 'N2', 'Correction anomalies, supervision equipe BO'),
+('operateur_bo',             2, 'N1', 'Traitement operations, saisie et validation de base'),
+('superviseur_bo',           2, 'N2', 'Correction anomalies, supervision equipe BO'),
 -- Gestion patrimoine
-('conseiller_patrimoine',     3, 'N3', 'Portefeuilles assignes, ordres marche'),
-('analyste_portefeuille',     3, 'N3', 'Analyse financiere, reporting patrimoine'),
-('responsable_patrimoine',    3, 'N3', 'Supervision GP, validation strategies'),
+('conseiller_patrimoine',    3, 'N3', 'Portefeuilles assignes, ordres marche'),
+('analyste_portefeuille',    3, 'N3', 'Analyse financiere, reporting patrimoine'),
+('responsable_patrimoine',   3, 'N3', 'Supervision GP, validation strategies'),
 -- Risque
-('analyste_risque_credit',    4, 'N3', 'Modeles credit, notation emprunteurs'),
-('analyste_risque_marche',    4, 'N3', 'Exposition marche, VaR, stress tests'),
-('responsable_risque',        4, 'N3', 'Supervision risque, reporting prudentiel'),
--- Conformite / AML
-('analyste_aml',              5, 'N4', 'Alertes blanchiment, declarations soupcon'),
-('gestionnaire_kyc',          5, 'N3', 'KYC approfondi, due diligence clients'),
-('specialiste_sanctions',     5, 'N4', 'Filtrage listes OFAC, ONU, UE'),
-('responsable_conformite',    5, 'N4', 'Supervision conformite, echanges ACPR'),
+('analyste_risque_credit',   4, 'N3', 'Modeles credit, notation emprunteurs'),
+('analyste_risque_marche',   4, 'N3', 'Exposition marche, VaR, stress tests'),
+('responsable_risque',       4, 'N3', 'Supervision risque, reporting prudentiel'),
+-- Conformité / AML
+('analyste_aml',             5, 'N4', 'Alertes blanchiment, declarations soupcon'),
+('gestionnaire_kyc',         5, 'N3', 'KYC approfondi, due diligence clients'),
+('specialiste_sanctions',    5, 'N4', 'Filtrage listes OFAC, ONU, UE'),
+('responsable_conformite',   5, 'N4', 'Supervision conformite, echanges ACPR'),
 -- Audit interne
-('auditeur',                  6, 'N3', 'Missions audit, lecture journaux, rapports'),
-('auditeur_senior',           6, 'N4', 'Missions sensibles, acces dossiers N4 en lecture'),
-('directeur_audit',           6, 'N4', 'Supervision audit, rapport conseil admin'),
+('auditeur',                 6, 'N3', 'Missions audit, lecture journaux, rapports'),
+('auditeur_senior',          6, 'N4', 'Missions sensibles, acces dossiers N4 en lecture'),
+('directeur_audit',          6, 'N4', 'Supervision audit, rapport conseil admin'),
 -- Juridique
-('juriste_bancaire',          7, 'N3', 'Validation operations complexes, droit bancaire'),
-('juriste_conformite',        7, 'N4', 'Conformite reglementaire, echanges autorites'),
-('directeur_juridique',       7, 'N4', 'Direction juridique, litiges strategiques'),
+('juriste_bancaire',         7, 'N3', 'Validation operations complexes, droit bancaire'),
+('juriste_conformite',       7, 'N4', 'Conformite reglementaire, echanges autorites'),
+('directeur_juridique',      7, 'N4', 'Direction juridique, litiges strategiques'),
 -- Cadres commerciaux
-('directeur_commercial',      8, 'N2', 'Performance commerciale, KPIs agreges'),
-('responsable_segment',       8, 'N2', 'Segment clientele, objectifs equipe'),
--- Experts regionaux
-('expert_regional',           9, 'N3', 'Investigation ponctuelle, expertise locale'),
+('directeur_commercial',     8, 'N2', 'Performance commerciale, KPIs agreges'),
+('responsable_segment',      8, 'N2', 'Segment clientele, objectifs equipe'),
+-- Experts régionaux
+('expert_regional',          9, 'N3', 'Investigation ponctuelle, expertise locale'),
 -- Support
-('agent_support',            10, 'N1', 'IT, RH, logistique');
+('agent_support',           10, 'N1', 'IT, RH, logistique');
 
 
--- 3.2  Permissions (granularites des actions)
+-- 3.2  Permissions granulaires
 CREATE TABLE permissions (
-    id_permission   SERIAL          PRIMARY KEY,
-    ressource_type  VARCHAR(50)     NOT NULL,  -- ex: 'DOSSIER_CLIENT', 'JOURNAL_AUDIT'
-    action          action_enum     NOT NULL,
-    niveau_min      niveau_enum     NOT NULL,  -- niveau minimum pour cette permission
-    description     TEXT,
+    id_permission  SERIAL        PRIMARY KEY,
+    ressource_type VARCHAR(50)   NOT NULL,
+    action         action_enum   NOT NULL,
+    niveau_min     niveau_enum   NOT NULL,
+    description    TEXT,
     UNIQUE(ressource_type, action)
 );
 
 INSERT INTO permissions (ressource_type, action, niveau_min, description) VALUES
-('DONNEES_CLIENT',      'LIRE',      'N2', 'Lire les donnees de base d un client'),
-('DONNEES_CLIENT',      'MODIFIER',  'N2', 'Modifier les donnees client (mise a jour KYC)'),
-('PORTEFEUILLE',        'LIRE',      'N3', 'Consulter un portefeuille detaille'),
-('PORTEFEUILLE',        'ECRIRE',    'N3', 'Enregistrer un ordre sur un portefeuille'),
-('CONTRAT_CREDIT',      'LIRE',      'N2', 'Lire un contrat de credit'),
-('CONTRAT_CREDIT',      'MODIFIER',  'N3', 'Modifier les conditions d un credit'),
-('ANALYSE_RISQUE',      'LIRE',      'N3', 'Consulter une analyse de risque'),
-('ANALYSE_RISQUE',      'ECRIRE',    'N3', 'Produire une analyse de risque'),
-('DOSSIER_KYC',         'LIRE',      'N2', 'Lire un dossier KYC de base'),
-('DOSSIER_KYC',         'MODIFIER',  'N3', 'Modifier / completer un dossier KYC'),
-('DOSSIER_AML',         'LIRE',      'N4', 'Lire un dossier AML actif'),
-('DOSSIER_AML',         'ECRIRE',    'N4', 'Creer ou enrichir un dossier AML'),
-('ALERTE_FRAUDE',       'LIRE',      'N3', 'Consulter une alerte fraude'),
-('ALERTE_FRAUDE',       'VALIDER',   'N4', 'Cloturer ou escalader une alerte'),
-('JOURNAL_AUDIT',       'LIRE',      'N3', 'Consulter les journaux d audit'),
-('JOURNAL_AUDIT',       'ECRIRE',    'N2', 'Ecrire dans le journal (systeme)'),
-('INVESTIGATION',       'LIRE',      'N4', 'Lire une investigation reglementaire'),
-('INVESTIGATION',       'ECRIRE',    'N4', 'Contribuer a une investigation'),
-('RAPPORT_REGULATEUR',  'LIRE',      'N3', 'Lire les rapports transmis aux regulateurs'),
-('RAPPORT_REGULATEUR',  'EXPORTER',  'N4', 'Exporter / transmettre aux autorites'),
-('KPI_COMMERCIAL',      'LIRE',      'N2', 'Lire les indicateurs de performance'),
-('OPERATIONS_COURANTES','LIRE',      'N1', 'Consulter les operations du jour'),
-('OPERATIONS_COURANTES','ECRIRE',    'N1', 'Saisir une operation courante'),
-('OPERATIONS_COURANTES','VALIDER',   'N2', 'Valider une operation (supervisor)');
+('DONNEES_CLIENT',       'LIRE',     'N2', 'Lire les donnees de base d un client'),
+('DONNEES_CLIENT',       'MODIFIER', 'N2', 'Modifier les donnees client (mise a jour KYC)'),
+('PORTEFEUILLE',         'LIRE',     'N3', 'Consulter un portefeuille detaille'),
+('PORTEFEUILLE',         'ECRIRE',   'N3', 'Enregistrer un ordre sur un portefeuille'),
+('CONTRAT_CREDIT',       'LIRE',     'N2', 'Lire un contrat de credit'),
+('CONTRAT_CREDIT',       'MODIFIER', 'N3', 'Modifier les conditions d un credit'),
+('ANALYSE_RISQUE',       'LIRE',     'N3', 'Consulter une analyse de risque'),
+('ANALYSE_RISQUE',       'ECRIRE',   'N3', 'Produire une analyse de risque'),
+('DOSSIER_KYC',          'LIRE',     'N2', 'Lire un dossier KYC de base'),
+('DOSSIER_KYC',          'MODIFIER', 'N3', 'Modifier / completer un dossier KYC'),
+('DOSSIER_AML',          'LIRE',     'N4', 'Lire un dossier AML actif'),
+('DOSSIER_AML',          'ECRIRE',   'N4', 'Creer ou enrichir un dossier AML'),
+('ALERTE_FRAUDE',        'LIRE',     'N3', 'Consulter une alerte fraude'),
+('ALERTE_FRAUDE',        'VALIDER',  'N4', 'Cloturer ou escalader une alerte'),
+('JOURNAL_AUDIT',        'LIRE',     'N3', 'Consulter les journaux d audit'),
+('JOURNAL_AUDIT',        'ECRIRE',   'N2', 'Ecrire dans le journal (systeme)'),
+('INVESTIGATION',        'LIRE',     'N4', 'Lire une investigation reglementaire'),
+('INVESTIGATION',        'ECRIRE',   'N4', 'Contribuer a une investigation'),
+('RAPPORT_REGULATEUR',   'LIRE',     'N3', 'Lire les rapports transmis aux regulateurs'),
+('RAPPORT_REGULATEUR',   'EXPORTER', 'N4', 'Exporter / transmettre aux autorites'),
+('KPI_COMMERCIAL',       'LIRE',     'N2', 'Lire les indicateurs de performance'),
+('OPERATIONS_COURANTES', 'LIRE',     'N1', 'Consulter les operations du jour'),
+('OPERATIONS_COURANTES', 'ECRIRE',   'N1', 'Saisir une operation courante'),
+('OPERATIONS_COURANTES', 'VALIDER',  'N2', 'Valider une operation (supervisor)'),
+('OPERATIONS_GUICHET',   'LIRE',     'N1', 'Consulter la file et les operations guichet en cours'),
+('OPERATIONS_GUICHET',   'ECRIRE',   'N1', 'Enregistrer une operation au guichet'),
+('OPERATIONS_GUICHET',   'VALIDER',  'N2', 'Valider ou rejeter une operation guichet'),
+('OPERATIONS_GUICHET',   'MODIFIER', 'N2', 'Corriger une operation guichet avant cloture');
 
 
--- 3.3  Association roles <-> permissions
+-- 3.3  Association rôles <-> permissions
 CREATE TABLE role_permissions (
-    id_role         INT     NOT NULL REFERENCES roles(id_role)       ON DELETE CASCADE,
-    id_permission   INT     NOT NULL REFERENCES permissions(id_permission) ON DELETE CASCADE,
+    id_role       INT  NOT NULL REFERENCES roles(id_role)       ON DELETE CASCADE,
+    id_permission INT  NOT NULL REFERENCES permissions(id_permission) ON DELETE CASCADE,
     PRIMARY KEY (id_role, id_permission)
 );
 
--- Relation clientele
+-- Relation clientèle — conseillers
 INSERT INTO role_permissions
   SELECT r.id_role, p.id_permission
   FROM roles r, permissions p
@@ -226,6 +272,7 @@ INSERT INTO role_permissions
     AND p.ressource_type IN ('DONNEES_CLIENT','DOSSIER_KYC','OPERATIONS_COURANTES','CONTRAT_CREDIT')
     AND p.action IN ('LIRE','ECRIRE');
 
+-- Relation clientèle — responsable agence
 INSERT INTO role_permissions
   SELECT r.id_role, p.id_permission
   FROM roles r, permissions p
@@ -233,7 +280,22 @@ INSERT INTO role_permissions
     AND p.ressource_type IN ('DONNEES_CLIENT','DOSSIER_KYC','OPERATIONS_COURANTES','KPI_COMMERCIAL')
     AND p.action IN ('LIRE','MODIFIER','VALIDER');
 
--- Back-office
+-- Relation clientèle — guichetier responsable
+INSERT INTO role_permissions
+  SELECT r.id_role, p.id_permission
+  FROM roles r, permissions p
+  WHERE r.nom_role = 'guichetier_responsable'
+    AND (
+      (p.ressource_type IN ('DONNEES_CLIENT','DOSSIER_KYC','OPERATIONS_COURANTES')
+       AND p.action IN ('LIRE','ECRIRE','VALIDER'))
+      OR (p.ressource_type = 'CONTRAT_CREDIT'       AND p.action = 'LIRE')
+      OR (p.ressource_type = 'KPI_COMMERCIAL'       AND p.action = 'LIRE')
+      OR (p.ressource_type = 'JOURNAL_AUDIT'        AND p.action = 'ECRIRE')
+      OR  p.ressource_type = 'OPERATIONS_GUICHET'
+    )
+ON CONFLICT DO NOTHING;
+
+-- Back-office — opérateur
 INSERT INTO role_permissions
   SELECT r.id_role, p.id_permission
   FROM roles r, permissions p
@@ -241,6 +303,7 @@ INSERT INTO role_permissions
     AND p.ressource_type IN ('OPERATIONS_COURANTES','CONTRAT_CREDIT')
     AND p.action IN ('LIRE','ECRIRE');
 
+-- Back-office — superviseur
 INSERT INTO role_permissions
   SELECT r.id_role, p.id_permission
   FROM roles r, permissions p
@@ -248,7 +311,7 @@ INSERT INTO role_permissions
     AND p.ressource_type IN ('OPERATIONS_COURANTES','CONTRAT_CREDIT','DONNEES_CLIENT','JOURNAL_AUDIT')
     AND p.action IN ('LIRE','MODIFIER','VALIDER','ECRIRE');
 
--- Gestion patrimoine
+-- Gestion de patrimoine
 INSERT INTO role_permissions
   SELECT r.id_role, p.id_permission
   FROM roles r, permissions p
@@ -256,7 +319,7 @@ INSERT INTO role_permissions
     AND p.ressource_type IN ('PORTEFEUILLE','DONNEES_CLIENT','CONTRAT_CREDIT','DOSSIER_KYC','ANALYSE_RISQUE')
     AND p.action IN ('LIRE','ECRIRE','MODIFIER');
 
--- Risque (lecture seule sur les donnees clients)
+-- Risque — analystes
 INSERT INTO role_permissions
   SELECT r.id_role, p.id_permission
   FROM roles r, permissions p
@@ -264,6 +327,7 @@ INSERT INTO role_permissions
     AND p.ressource_type IN ('ANALYSE_RISQUE','CONTRAT_CREDIT','PORTEFEUILLE','DONNEES_CLIENT')
     AND p.action IN ('LIRE','ECRIRE');
 
+-- Risque — responsable
 INSERT INTO role_permissions
   SELECT r.id_role, p.id_permission
   FROM roles r, permissions p
@@ -271,7 +335,7 @@ INSERT INTO role_permissions
     AND p.ressource_type IN ('ANALYSE_RISQUE','RAPPORT_REGULATEUR','JOURNAL_AUDIT')
     AND p.action IN ('LIRE','ECRIRE');
 
--- Conformite / AML
+-- Conformité / AML
 INSERT INTO role_permissions
   SELECT r.id_role, p.id_permission
   FROM roles r, permissions p
@@ -279,6 +343,7 @@ INSERT INTO role_permissions
     AND p.ressource_type IN ('DOSSIER_AML','ALERTE_FRAUDE','INVESTIGATION','RAPPORT_REGULATEUR',
                              'DONNEES_CLIENT','DOSSIER_KYC','JOURNAL_AUDIT');
 
+-- Conformité / AML — gestionnaire KYC
 INSERT INTO role_permissions
   SELECT r.id_role, p.id_permission
   FROM roles r, permissions p
@@ -302,7 +367,7 @@ INSERT INTO role_permissions
                              'CONTRAT_CREDIT','JOURNAL_AUDIT')
     AND p.action IN ('LIRE','EXPORTER');
 
--- Cadres commerciaux (KPIs agreges uniquement)
+-- Cadres commerciaux
 INSERT INTO role_permissions
   SELECT r.id_role, p.id_permission
   FROM roles r, permissions p
@@ -310,7 +375,7 @@ INSERT INTO role_permissions
     AND p.ressource_type IN ('KPI_COMMERCIAL','DONNEES_CLIENT','OPERATIONS_COURANTES')
     AND p.action = 'LIRE';
 
--- Expert regional (lecture investigation + KYC)
+-- Experts régionaux
 INSERT INTO role_permissions
   SELECT r.id_role, p.id_permission
   FROM roles r, permissions p
@@ -318,7 +383,7 @@ INSERT INTO role_permissions
     AND p.ressource_type IN ('INVESTIGATION','DOSSIER_KYC','DONNEES_CLIENT','ALERTE_FRAUDE')
     AND p.action IN ('LIRE','ECRIRE');
 
--- Support (N1 uniquement)
+-- Support
 INSERT INTO role_permissions
   SELECT r.id_role, p.id_permission
   FROM roles r, permissions p
@@ -327,346 +392,613 @@ INSERT INTO role_permissions
     AND p.action = 'LIRE';
 
 
--- -------------------------------------------------------------
--- 4. UTILISATEURS
--- -------------------------------------------------------------
+-- ==============================================================
+-- PARTIE 4 : UTILISATEURS
+-- ==============================================================
 
 CREATE TABLE utilisateurs (
-    id_utilisateur  SERIAL          PRIMARY KEY,
-    matricule       VARCHAR(20)     NOT NULL UNIQUE,
-    nom             VARCHAR(100)    NOT NULL,
-    prenom          VARCHAR(100)    NOT NULL,
-    email           VARCHAR(150)    NOT NULL UNIQUE,
-    id_equipe       INT             NOT NULL REFERENCES equipes(id_equipe),
-    code_pays       CHAR(2)         NOT NULL REFERENCES pays(code_pays),
-    statut          statut_enum     NOT NULL DEFAULT 'ACTIF',
-    date_creation   TIMESTAMP       NOT NULL DEFAULT NOW(),
-    derniere_cnx    TIMESTAMP,
-    mfa_actif       BOOLEAN         NOT NULL DEFAULT FALSE
+    id_utilisateur SERIAL        PRIMARY KEY,
+    matricule      VARCHAR(20)   NOT NULL UNIQUE,
+    nom            VARCHAR(100)  NOT NULL,
+    prenom         VARCHAR(100)  NOT NULL,
+    email          VARCHAR(150)  NOT NULL UNIQUE,
+    id_equipe      INT           NOT NULL REFERENCES equipes(id_equipe),
+    code_pays      CHAR(2)       NOT NULL REFERENCES pays(code_pays),
+    statut         statut_enum   NOT NULL DEFAULT 'ACTIF',
+    date_creation  TIMESTAMP     NOT NULL DEFAULT NOW(),
+    derniere_cnx   TIMESTAMP,
+    mfa_actif      BOOLEAN       NOT NULL DEFAULT FALSE
 );
 
+-- NOTE : le trigger d'attribution automatique est défini plus bas ;
+--        les INSERT ci-dessous le déclencheront donc automatiquement.
+--        Les blp_habilitations et utilisateur_roles seront remplis
+--        par le trigger — inutile de les dupliquer manuellement.
+
 INSERT INTO utilisateurs (matricule, nom, prenom, email, id_equipe, code_pays, mfa_actif) VALUES
--- Relation clientele
-('RC001','Ben Ali',    'Sami',    'sami.benali@banque.tn',    1,'TN', FALSE),
-('RC002','Martin',     'Claire',  'claire.martin@banque.fr',  1,'FR', FALSE),
-('RC003','Dupont',     'Marc',    'marc.dupont@banque.fr',    1,'FR', FALSE),
+-- Relation clientèle
+('RC001','Ben Ali',   'Sami',    'sami.benali@banque.tn',     1,'TN', FALSE),
+('RC002','Martin',    'Claire',  'claire.martin@banque.fr',   1,'FR', FALSE),
+('RC003','Dupont',    'Marc',    'marc.dupont@banque.fr',     1,'FR', FALSE),
 -- Back-office
-('BO001','Trabelsi',   'Nadia',   'nadia.trabelsi@banque.tn', 2,'TN', FALSE),
-('BO002','Schmidt',    'Hans',    'hans.schmidt@banque.de',   2,'DE', FALSE),
+('BO001','Trabelsi',  'Nadia',   'nadia.trabelsi@banque.tn',  2,'TN', FALSE),
+('BO002','Schmidt',   'Hans',    'hans.schmidt@banque.de',    2,'DE', FALSE),
 -- Gestion patrimoine
-('GP001','Leblanc',    'Sophie',  'sophie.leblanc@banque.fr', 3,'FR', TRUE),
-('GP002','Hamdi',      'Karim',   'karim.hamdi@banque.tn',    3,'TN', TRUE),
+('GP001','Leblanc',   'Sophie',  'sophie.leblanc@banque.fr',  3,'FR', TRUE),
+('GP002','Hamdi',     'Karim',   'karim.hamdi@banque.tn',     3,'TN', TRUE),
 -- Risque
-('RS001','Lambert',    'Eric',    'eric.lambert@banque.fr',   4,'FR', TRUE),
-('RS002','Nguyen',     'Lan',     'lan.nguyen@banque.sg',     4,'SG', TRUE),
--- Conformite / AML
-('AML001','Moreau',    'Julie',   'julie.moreau@banque.fr',   5,'FR', TRUE),
-('AML002','Chahed',    'Walid',   'walid.chahed@banque.tn',   5,'TN', TRUE),
-('AML003','Wilson',    'James',   'james.wilson@banque.gb',   5,'GB', TRUE),
+('RS001','Lambert',   'Eric',    'eric.lambert@banque.fr',    4,'FR', TRUE),
+('RS002','Nguyen',    'Lan',     'lan.nguyen@banque.sg',      4,'SG', TRUE),
+-- Conformité / AML
+('AML001','Moreau',   'Julie',   'julie.moreau@banque.fr',    5,'FR', TRUE),
+('AML002','Chahed',   'Walid',   'walid.chahed@banque.tn',    5,'TN', TRUE),
+('AML003','Wilson',   'James',   'james.wilson@banque.gb',    5,'GB', TRUE),
 -- Audit interne
-('AI001','Fontaine',   'Pierre',  'pierre.fontaine@banque.fr',6,'FR', TRUE),
-('AI002','Bouaziz',    'Leila',   'leila.bouaziz@banque.tn',  6,'TN', TRUE),
+('AI001','Fontaine',  'Pierre',  'pierre.fontaine@banque.fr', 6,'FR', TRUE),
+('AI002','Bouaziz',   'Leila',   'leila.bouaziz@banque.tn',   6,'TN', TRUE),
 -- Juridique
-('JR001','Bernard',    'Anne',    'anne.bernard@banque.fr',   7,'FR', TRUE),
-('JR002','Slimane',    'Rania',   'rania.slimane@banque.tn',  7,'TN', TRUE),
+('JR001','Bernard',   'Anne',    'anne.bernard@banque.fr',    7,'FR', TRUE),
+('JR002','Slimane',   'Rania',   'rania.slimane@banque.tn',   7,'TN', TRUE),
 -- Cadres commerciaux
-('CC001','Renard',     'Luc',     'luc.renard@banque.fr',     8,'FR', FALSE),
-('CC002','Mansour',    'Tarek',   'tarek.mansour@banque.tn',  8,'TN', FALSE),
--- Expert regional (temporaire)
-('ER001','Kowalski',   'Anna',    'anna.kowalski@banque.fr',  9,'FR', TRUE),
+('CC001','Renard',    'Luc',     'luc.renard@banque.fr',      8,'FR', FALSE),
+('CC002','Mansour',   'Tarek',   'tarek.mansour@banque.tn',   8,'TN', FALSE),
+-- Expert régional
+('ER001','Kowalski',  'Anna',    'anna.kowalski@banque.fr',   9,'FR', TRUE),
 -- Support
-('SP001','Laurent',    'Tom',     'tom.laurent@banque.fr',   10,'FR', FALSE);
+('SP001','Laurent',   'Tom',     'tom.laurent@banque.fr',    10,'FR', FALSE),
+-- Guichetiers responsables (équipe 1 = Relation clientèle)
+('GR001','Gharbi',    'Mehdi',   'mehdi.gharbi@banque.tn',    1,'TN', FALSE),
+('GR002','Leroux',    'Isabelle','isabelle.leroux@banque.fr',  1,'FR', FALSE),
+('GR003','El Amri',   'Faycal',  'faycal.elamri@banque.ma',   1,'MA', FALSE);
 
 
--- 4.1  Association utilisateurs <-> roles
+-- 4.1  Table des rôles assignés
 CREATE TABLE utilisateur_roles (
-    id_utilisateur  INT         NOT NULL REFERENCES utilisateurs(id_utilisateur) ON DELETE CASCADE,
-    id_role         INT         NOT NULL REFERENCES roles(id_role),
-    date_debut      DATE        NOT NULL DEFAULT CURRENT_DATE,
-    date_fin        DATE,                          -- NULL = permanent
-    actif           BOOLEAN     NOT NULL DEFAULT TRUE,
+    id_utilisateur INT      NOT NULL REFERENCES utilisateurs(id_utilisateur) ON DELETE CASCADE,
+    id_role        INT      NOT NULL REFERENCES roles(id_role),
+    date_debut     DATE     NOT NULL DEFAULT CURRENT_DATE,
+    date_fin       DATE,
+    actif          BOOLEAN  NOT NULL DEFAULT TRUE,
     PRIMARY KEY (id_utilisateur, id_role)
 );
 
-INSERT INTO utilisateur_roles (id_utilisateur, id_role) VALUES
-(1,  (SELECT id_role FROM roles WHERE nom_role='conseiller_particulier')),
-(2,  (SELECT id_role FROM roles WHERE nom_role='conseiller_particulier')),
-(3,  (SELECT id_role FROM roles WHERE nom_role='conseiller_entreprise')),
-(4,  (SELECT id_role FROM roles WHERE nom_role='operateur_bo')),
-(5,  (SELECT id_role FROM roles WHERE nom_role='superviseur_bo')),
-(6,  (SELECT id_role FROM roles WHERE nom_role='conseiller_patrimoine')),
-(7,  (SELECT id_role FROM roles WHERE nom_role='conseiller_patrimoine')),
-(8,  (SELECT id_role FROM roles WHERE nom_role='analyste_risque_credit')),
-(9,  (SELECT id_role FROM roles WHERE nom_role='analyste_risque_marche')),
-(10, (SELECT id_role FROM roles WHERE nom_role='analyste_aml')),
-(11, (SELECT id_role FROM roles WHERE nom_role='analyste_aml')),
-(12, (SELECT id_role FROM roles WHERE nom_role='specialiste_sanctions')),
-(13, (SELECT id_role FROM roles WHERE nom_role='auditeur')),
-(14, (SELECT id_role FROM roles WHERE nom_role='auditeur_senior')),
-(15, (SELECT id_role FROM roles WHERE nom_role='juriste_bancaire')),
-(16, (SELECT id_role FROM roles WHERE nom_role='juriste_conformite')),
-(17, (SELECT id_role FROM roles WHERE nom_role='directeur_commercial')),
-(18, (SELECT id_role FROM roles WHERE nom_role='responsable_segment')),
-(19, (SELECT id_role FROM roles WHERE nom_role='expert_regional')),
-(20, (SELECT id_role FROM roles WHERE nom_role='agent_support'));
 
-
--- -------------------------------------------------------------
--- 5. RESSOURCES (les objets proteges)
--- -------------------------------------------------------------
+-- ==============================================================
+-- PARTIE 5 : RESSOURCES (objets protégés)
+-- ==============================================================
 
 CREATE TABLE ressources (
-    id_ressource    SERIAL          PRIMARY KEY,
-    reference       VARCHAR(50)     NOT NULL UNIQUE,
-    type_ressource  VARCHAR(50)     NOT NULL,
-    niveau_requis   niveau_enum     NOT NULL,
-    code_pays       CHAR(2)         REFERENCES pays(code_pays),
-    id_proprietaire INT             REFERENCES utilisateurs(id_utilisateur),
-    description     TEXT,
-    date_creation   TIMESTAMP       NOT NULL DEFAULT NOW(),
-    actif           BOOLEAN         NOT NULL DEFAULT TRUE
+    id_ressource   SERIAL        PRIMARY KEY,
+    reference      VARCHAR(50)   NOT NULL UNIQUE,
+    type_ressource VARCHAR(50)   NOT NULL,
+    niveau_requis  niveau_enum   NOT NULL,
+    -- Colonne groupe_conflict pour Chinese Wall (correction bug original)
+    groupe_conflict VARCHAR(50),
+    classe_conflict VARCHAR(50),
+    code_pays      CHAR(2)       REFERENCES pays(code_pays),
+    id_proprietaire INT          REFERENCES utilisateurs(id_utilisateur),
+    description    TEXT,
+    date_creation  TIMESTAMP     NOT NULL DEFAULT NOW(),
+    actif          BOOLEAN       NOT NULL DEFAULT TRUE
 );
 
-INSERT INTO ressources (reference, type_ressource, niveau_requis, code_pays, id_proprietaire, description) VALUES
-('CLI-TN-001',  'DONNEES_CLIENT',     'N2', 'TN', 1,  'Dossier client particulier Tunisie'),
-('CLI-FR-001',  'DONNEES_CLIENT',     'N2', 'FR', 2,  'Dossier client particulier France'),
-('PTF-FR-GP01', 'PORTEFEUILLE',       'N3', 'FR', 6,  'Portefeuille HNW client France - GP Leblanc'),
-('PTF-TN-GP02', 'PORTEFEUILLE',       'N3', 'TN', 7,  'Portefeuille HNW client Tunisie - GP Hamdi'),
-('KYC-TN-001',  'DOSSIER_KYC',        'N2', 'TN', 1,  'KYC client particulier Tunisie'),
-('KYC-FR-AML01','DOSSIER_KYC',        'N3', 'FR',10,  'KYC approfondi dossier suspect France'),
-('AML-FR-2024-01','DOSSIER_AML',      'N4', 'FR',10,  'Investigation blanchiment - client France'),
-('AML-TN-2024-01','DOSSIER_AML',      'N4', 'TN',11,  'Investigation blanchiment - client Tunisie'),
-('SANC-GB-001', 'ALERTE_FRAUDE',      'N4', 'GB',12,  'Alerte sanctions OFAC - entite britannique'),
-('INV-REG-2024','INVESTIGATION',      'N4', 'FR',15,  'Investigation reglementaire ACPR 2024'),
-('AUDIT-LOG-01','JOURNAL_AUDIT',      'N3', NULL,13,  'Journal audit systeme acces'),
-('RISQUE-Q4-24','ANALYSE_RISQUE',     'N3', 'FR', 8,  'Rapport risque Q4 2024'),
-('CREDIT-001',  'CONTRAT_CREDIT',     'N2', 'TN', 4,  'Contrat credit immobilier client TN'),
-('KPI-2024-Q4', 'KPI_COMMERCIAL',     'N2', NULL,17,  'KPIs commerciaux Q4 2024'),
-('OPS-BO-2024', 'OPERATIONS_COURANTES','N1',NULL, 4,  'Operations batch journee');
+INSERT INTO ressources
+  (reference, type_ressource, niveau_requis, groupe_conflict, classe_conflict,
+   code_pays, id_proprietaire, description)
+VALUES
+('CLI-TN-001',     'DONNEES_CLIENT',      'N2', NULL,                 NULL,           'TN',
+ (SELECT id_utilisateur FROM utilisateurs WHERE matricule='RC001'),
+ 'Dossier client particulier Tunisie'),
+
+('CLI-FR-001',     'DONNEES_CLIENT',      'N2', NULL,                 NULL,           'FR',
+ (SELECT id_utilisateur FROM utilisateurs WHERE matricule='RC002'),
+ 'Dossier client particulier France'),
+
+('PTF-FR-GP01',    'PORTEFEUILLE',        'N3', 'GROUPE_INDUS_ALPHA', 'INDUSTRIE',    'FR',
+ (SELECT id_utilisateur FROM utilisateurs WHERE matricule='GP001'),
+ 'Portefeuille HNW client France - GP Leblanc'),
+
+('PTF-TN-GP02',    'PORTEFEUILLE',        'N3', 'GROUPE_INDUS_BETA',  'INDUSTRIE',    'TN',
+ (SELECT id_utilisateur FROM utilisateurs WHERE matricule='GP002'),
+ 'Portefeuille HNW client Tunisie - GP Hamdi'),
+
+('KYC-TN-001',     'DOSSIER_KYC',         'N2', NULL,                 NULL,           'TN',
+ (SELECT id_utilisateur FROM utilisateurs WHERE matricule='RC001'),
+ 'KYC client particulier Tunisie'),
+
+('KYC-FR-AML01',   'DOSSIER_KYC',         'N3', NULL,                 NULL,           'FR',
+ (SELECT id_utilisateur FROM utilisateurs WHERE matricule='AML001'),
+ 'KYC approfondi dossier suspect France'),
+
+('AML-FR-2024-01', 'DOSSIER_AML',         'N4', NULL,                 NULL,           'FR',
+ (SELECT id_utilisateur FROM utilisateurs WHERE matricule='AML001'),
+ 'Investigation blanchiment - client France'),
+
+('AML-TN-2024-01', 'DOSSIER_AML',         'N4', NULL,                 NULL,           'TN',
+ (SELECT id_utilisateur FROM utilisateurs WHERE matricule='AML002'),
+ 'Investigation blanchiment - client Tunisie'),
+
+('SANC-GB-001',    'ALERTE_FRAUDE',       'N4', NULL,                 NULL,           'GB',
+ (SELECT id_utilisateur FROM utilisateurs WHERE matricule='AML003'),
+ 'Alerte sanctions OFAC - entite britannique'),
+
+('INV-REG-2024',   'INVESTIGATION',       'N4', NULL,                 NULL,           'FR',
+ (SELECT id_utilisateur FROM utilisateurs WHERE matricule='JR001'),
+ 'Investigation reglementaire ACPR 2024'),
+
+('AUDIT-LOG-01',   'JOURNAL_AUDIT',       'N3', NULL,                 NULL,           NULL,
+ (SELECT id_utilisateur FROM utilisateurs WHERE matricule='AI001'),
+ 'Journal audit systeme acces'),
+
+('RISQUE-Q4-24',   'ANALYSE_RISQUE',      'N3', 'GROUPE_INDUS_ALPHA', 'INDUSTRIE',    'FR',
+ (SELECT id_utilisateur FROM utilisateurs WHERE matricule='RS001'),
+ 'Rapport risque Q4 2024'),
+
+('CREDIT-001',     'CONTRAT_CREDIT',      'N2', NULL,                 NULL,           'TN',
+ (SELECT id_utilisateur FROM utilisateurs WHERE matricule='BO001'),
+ 'Contrat credit immobilier client TN'),
+
+('KPI-2024-Q4',    'KPI_COMMERCIAL',      'N2', NULL,                 NULL,           NULL,
+ (SELECT id_utilisateur FROM utilisateurs WHERE matricule='CC001'),
+ 'KPIs commerciaux Q4 2024'),
+
+('OPS-BO-2024',    'OPERATIONS_COURANTES','N1', NULL,                 NULL,           NULL,
+ (SELECT id_utilisateur FROM utilisateurs WHERE matricule='BO001'),
+ 'Operations batch journee'),
+
+('GUICHET-TN-2024','OPERATIONS_GUICHET',  'N1', NULL,                 NULL,           'TN',
+ (SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR001'),
+ 'Journal des operations guichet - agence Tunisie 2024'),
+
+('GUICHET-FR-2024','OPERATIONS_GUICHET',  'N1', NULL,                 NULL,           'FR',
+ (SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR002'),
+ 'Journal des operations guichet - agence France 2024'),
+
+('GUICHET-MA-2024','OPERATIONS_GUICHET',  'N1', NULL,                 NULL,           'MA',
+ (SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR003'),
+ 'Journal des operations guichet - agence Maroc 2024');
 
 
--- -------------------------------------------------------------
--- 6. BLP : HABILITATIONS PAR NIVEAU
--- -------------------------------------------------------------
--- Enregistre le niveau maximum certifie pour chaque utilisateur
--- (separation de la classification RBAC et de l'habilitation MAC)
+-- ==============================================================
+-- PARTIE 6 : BLP — HABILITATIONS PAR NIVEAU
+-- ==============================================================
 
 CREATE TABLE blp_habilitations (
-    id_utilisateur  INT             NOT NULL REFERENCES utilisateurs(id_utilisateur) ON DELETE CASCADE,
-    niveau_max      niveau_enum     NOT NULL,
-    date_attribution DATE           NOT NULL DEFAULT CURRENT_DATE,
-    attribue_par    INT             REFERENCES utilisateurs(id_utilisateur),
+    id_utilisateur  INT          NOT NULL REFERENCES utilisateurs(id_utilisateur) ON DELETE CASCADE,
+    niveau_max      niveau_enum  NOT NULL,
+    date_attribution DATE        NOT NULL DEFAULT CURRENT_DATE,
+    attribue_par    INT          REFERENCES utilisateurs(id_utilisateur),
     commentaire     TEXT,
     PRIMARY KEY (id_utilisateur)
 );
 
-INSERT INTO blp_habilitations (id_utilisateur, niveau_max, attribue_par) VALUES
-(1,  'N2', 14),   -- RC Sami
-(2,  'N2', 14),   -- RC Claire
-(3,  'N2', 14),   -- RC Marc
-(4,  'N1', 14),   -- BO Nadia
-(5,  'N2', 14),   -- BO Hans
-(6,  'N3', 14),   -- GP Sophie
-(7,  'N3', 14),   -- GP Karim
-(8,  'N3', 14),   -- Risque Eric
-(9,  'N3', 14),   -- Risque Lan
-(10, 'N4', 14),   -- AML Julie
-(11, 'N4', 14),   -- AML Walid
-(12, 'N4', 14),   -- Sanctions James
-(13, 'N3', 14),   -- Audit Pierre
-(14, 'N4', 14),   -- Audit senior Leila
-(15, 'N3', 14),   -- Juridique Anne
-(16, 'N4', 14),   -- Juridique Rania
-(17, 'N2', 14),   -- Commercial Luc
-(18, 'N2', 14),   -- Commercial Tarek
-(19, 'N3', 14),   -- Expert Anna
-(20, 'N1', 14);   -- Support Tom
+-- Habilitations initiales alignées sur le niveau_max de chaque équipe
+-- (le trigger automatique les maintiendra pour les futurs utilisateurs)
+INSERT INTO blp_habilitations (id_utilisateur, niveau_max, attribue_par, commentaire)
+SELECT
+    u.id_utilisateur,
+    e.niveau_max,
+    (SELECT id_utilisateur FROM utilisateurs WHERE matricule = 'AI002'),
+    'Habilitation initiale - equipe ' || e.nom
+FROM utilisateurs u
+JOIN equipes e ON u.id_equipe = e.id_equipe
+ON CONFLICT (id_utilisateur) DO UPDATE
+    SET niveau_max = EXCLUDED.niveau_max,
+        commentaire = EXCLUDED.commentaire;
+
+-- Activer MFA pour tous les utilisateurs N3/N4
+UPDATE utilisateurs u
+SET    mfa_actif = TRUE
+FROM   blp_habilitations h
+WHERE  u.id_utilisateur = h.id_utilisateur
+  AND  h.niveau_max IN ('N3','N4')
+  AND  u.mfa_actif = FALSE;
 
 
--- -------------------------------------------------------------
--- 7. ABAC : POLITIQUES CONTEXTUELLES
--- -------------------------------------------------------------
+-- ==============================================================
+-- PARTIE 7 : RBAC — ASSIGNATION DES RÔLES AUX UTILISATEURS
+-- ==============================================================
+
+-- Attribuer à chaque utilisateur tous les rôles de son équipe
+INSERT INTO utilisateur_roles (id_utilisateur, id_role)
+SELECT u.id_utilisateur, r.id_role
+FROM   utilisateurs u
+JOIN   roles r ON r.id_equipe = u.id_equipe
+ON CONFLICT DO NOTHING;
+
+-- Corrections spécifiques : certains utilisateurs ont un rôle précis dans leur équipe
+-- (on désactive les rôles non correspondants et on laisse le bon)
+-- RC001, RC002 → conseiller_particulier
+UPDATE utilisateur_roles ur
+SET    actif = FALSE
+FROM   roles r, utilisateurs u
+WHERE  ur.id_role = r.id_role
+  AND  ur.id_utilisateur = u.id_utilisateur
+  AND  u.matricule IN ('RC001','RC002')
+  AND  r.nom_role NOT IN ('conseiller_particulier');
+
+-- RC003 → conseiller_entreprise
+UPDATE utilisateur_roles ur
+SET    actif = FALSE
+FROM   roles r, utilisateurs u
+WHERE  ur.id_role = r.id_role
+  AND  ur.id_utilisateur = u.id_utilisateur
+  AND  u.matricule = 'RC003'
+  AND  r.nom_role NOT IN ('conseiller_entreprise');
+
+-- BO001 → operateur_bo
+UPDATE utilisateur_roles ur
+SET    actif = FALSE
+FROM   roles r, utilisateurs u
+WHERE  ur.id_role = r.id_role
+  AND  ur.id_utilisateur = u.id_utilisateur
+  AND  u.matricule = 'BO001'
+  AND  r.nom_role NOT IN ('operateur_bo');
+
+-- BO002 → superviseur_bo
+UPDATE utilisateur_roles ur
+SET    actif = FALSE
+FROM   roles r, utilisateurs u
+WHERE  ur.id_role = r.id_role
+  AND  ur.id_utilisateur = u.id_utilisateur
+  AND  u.matricule = 'BO002'
+  AND  r.nom_role NOT IN ('superviseur_bo');
+
+-- GP001, GP002 → conseiller_patrimoine
+UPDATE utilisateur_roles ur
+SET    actif = FALSE
+FROM   roles r, utilisateurs u
+WHERE  ur.id_role = r.id_role
+  AND  ur.id_utilisateur = u.id_utilisateur
+  AND  u.matricule IN ('GP001','GP002')
+  AND  r.nom_role NOT IN ('conseiller_patrimoine');
+
+-- RS001 → analyste_risque_credit
+UPDATE utilisateur_roles ur
+SET    actif = FALSE
+FROM   roles r, utilisateurs u
+WHERE  ur.id_role = r.id_role
+  AND  ur.id_utilisateur = u.id_utilisateur
+  AND  u.matricule = 'RS001'
+  AND  r.nom_role NOT IN ('analyste_risque_credit');
+
+-- RS002 → analyste_risque_marche
+UPDATE utilisateur_roles ur
+SET    actif = FALSE
+FROM   roles r, utilisateurs u
+WHERE  ur.id_role = r.id_role
+  AND  ur.id_utilisateur = u.id_utilisateur
+  AND  u.matricule = 'RS002'
+  AND  r.nom_role NOT IN ('analyste_risque_marche');
+
+-- AML001, AML002 → analyste_aml
+UPDATE utilisateur_roles ur
+SET    actif = FALSE
+FROM   roles r, utilisateurs u
+WHERE  ur.id_role = r.id_role
+  AND  ur.id_utilisateur = u.id_utilisateur
+  AND  u.matricule IN ('AML001','AML002')
+  AND  r.nom_role NOT IN ('analyste_aml');
+
+-- AML003 → specialiste_sanctions
+UPDATE utilisateur_roles ur
+SET    actif = FALSE
+FROM   roles r, utilisateurs u
+WHERE  ur.id_role = r.id_role
+  AND  ur.id_utilisateur = u.id_utilisateur
+  AND  u.matricule = 'AML003'
+  AND  r.nom_role NOT IN ('specialiste_sanctions');
+
+-- AI001 → auditeur
+UPDATE utilisateur_roles ur
+SET    actif = FALSE
+FROM   roles r, utilisateurs u
+WHERE  ur.id_role = r.id_role
+  AND  ur.id_utilisateur = u.id_utilisateur
+  AND  u.matricule = 'AI001'
+  AND  r.nom_role NOT IN ('auditeur');
+
+-- AI002 → auditeur_senior
+UPDATE utilisateur_roles ur
+SET    actif = FALSE
+FROM   roles r, utilisateurs u
+WHERE  ur.id_role = r.id_role
+  AND  ur.id_utilisateur = u.id_utilisateur
+  AND  u.matricule = 'AI002'
+  AND  r.nom_role NOT IN ('auditeur_senior');
+
+-- JR001 → juriste_bancaire
+UPDATE utilisateur_roles ur
+SET    actif = FALSE
+FROM   roles r, utilisateurs u
+WHERE  ur.id_role = r.id_role
+  AND  ur.id_utilisateur = u.id_utilisateur
+  AND  u.matricule = 'JR001'
+  AND  r.nom_role NOT IN ('juriste_bancaire');
+
+-- JR002 → juriste_conformite
+UPDATE utilisateur_roles ur
+SET    actif = FALSE
+FROM   roles r, utilisateurs u
+WHERE  ur.id_role = r.id_role
+  AND  ur.id_utilisateur = u.id_utilisateur
+  AND  u.matricule = 'JR002'
+  AND  r.nom_role NOT IN ('juriste_conformite');
+
+-- CC001 → directeur_commercial
+UPDATE utilisateur_roles ur
+SET    actif = FALSE
+FROM   roles r, utilisateurs u
+WHERE  ur.id_role = r.id_role
+  AND  ur.id_utilisateur = u.id_utilisateur
+  AND  u.matricule = 'CC001'
+  AND  r.nom_role NOT IN ('directeur_commercial');
+
+-- CC002 → responsable_segment
+UPDATE utilisateur_roles ur
+SET    actif = FALSE
+FROM   roles r, utilisateurs u
+WHERE  ur.id_role = r.id_role
+  AND  ur.id_utilisateur = u.id_utilisateur
+  AND  u.matricule = 'CC002'
+  AND  r.nom_role NOT IN ('responsable_segment');
+
+-- ER001 → expert_regional
+UPDATE utilisateur_roles ur
+SET    actif = FALSE
+FROM   roles r, utilisateurs u
+WHERE  ur.id_role = r.id_role
+  AND  ur.id_utilisateur = u.id_utilisateur
+  AND  u.matricule = 'ER001'
+  AND  r.nom_role NOT IN ('expert_regional');
+
+-- SP001 → agent_support
+UPDATE utilisateur_roles ur
+SET    actif = FALSE
+FROM   roles r, utilisateurs u
+WHERE  ur.id_role = r.id_role
+  AND  ur.id_utilisateur = u.id_utilisateur
+  AND  u.matricule = 'SP001'
+  AND  r.nom_role NOT IN ('agent_support');
+
+-- GR001, GR002, GR003 → guichetier_responsable
+UPDATE utilisateur_roles ur
+SET    actif = FALSE
+FROM   roles r, utilisateurs u
+WHERE  ur.id_role = r.id_role
+  AND  ur.id_utilisateur = u.id_utilisateur
+  AND  u.matricule IN ('GR001','GR002','GR003')
+  AND  r.nom_role NOT IN ('guichetier_responsable');
+
+
+-- ==============================================================
+-- PARTIE 8 : ABAC — POLITIQUES CONTEXTUELLES
+-- ==============================================================
 
 CREATE TABLE abac_politiques (
-    id_politique    SERIAL          PRIMARY KEY,
-    nom             VARCHAR(100)    NOT NULL,
-    id_role         INT             REFERENCES roles(id_role),
-    type_ressource  VARCHAR(50),
-    -- Filtres contextuels
-    filtre_pays     BOOLEAN         NOT NULL DEFAULT FALSE,
-    filtre_portefeuille BOOLEAN     NOT NULL DEFAULT FALSE,
-    duree_max_heures INT,           -- NULL = pas de limite temporelle
-    heure_debut     TIME,           -- fenetre horaire autorisee
-    heure_fin       TIME,
-    jours_semaine   VARCHAR(20),    -- ex: 'LUN-VEN'
-    description     TEXT
+    id_politique         SERIAL        PRIMARY KEY,
+    nom                  VARCHAR(100)  NOT NULL,
+    id_role              INT           REFERENCES roles(id_role),
+    type_ressource       VARCHAR(50),
+    filtre_pays          BOOLEAN       NOT NULL DEFAULT FALSE,
+    filtre_portefeuille  BOOLEAN       NOT NULL DEFAULT FALSE,
+    duree_max_heures     INT,
+    heure_debut          TIME,
+    heure_fin            TIME,
+    jours_semaine        VARCHAR(20),
+    description          TEXT
 );
 
 INSERT INTO abac_politiques
-  (nom, id_role, type_ressource, filtre_pays, filtre_portefeuille, duree_max_heures, heure_debut, heure_fin, jours_semaine, description)
+  (nom, id_role, type_ressource, filtre_pays, filtre_portefeuille,
+   duree_max_heures, heure_debut, heure_fin, jours_semaine, description)
 VALUES
 ('RC_pays_portefeuille',
   (SELECT id_role FROM roles WHERE nom_role='conseiller_particulier'),
-  'DONNEES_CLIENT', TRUE, TRUE, NULL,
-  '08:00','18:30','LUN-SAM',
+  'DONNEES_CLIENT', TRUE, TRUE, NULL, '08:00','18:30','LUN-SAM',
   'Conseiller : acces uniquement clients de son pays et de son portefeuille assigne'),
 
 ('GP_portefeuille_strict',
   (SELECT id_role FROM roles WHERE nom_role='conseiller_patrimoine'),
-  'PORTEFEUILLE', TRUE, TRUE, NULL,
-  '07:30','20:00','LUN-VEN',
-  'Conseiller patrimoine : uniquement le portefeuille qui lui est assign'),
+  'PORTEFEUILLE', TRUE, TRUE, NULL, '07:30','20:00','LUN-VEN',
+  'Conseiller patrimoine : uniquement le portefeuille qui lui est assigne'),
 
 ('RISQUE_lecture_seule',
   (SELECT id_role FROM roles WHERE nom_role='analyste_risque_credit'),
-  'CONTRAT_CREDIT', FALSE, FALSE, NULL,
-  '08:00','19:00','LUN-VEN',
+  'CONTRAT_CREDIT', FALSE, FALSE, NULL, '08:00','19:00','LUN-VEN',
   'Analyste risque : acces lecture seule, tous pays, sans filtre portefeuille'),
 
 ('AML_dossier_assigne',
   (SELECT id_role FROM roles WHERE nom_role='analyste_aml'),
-  'DOSSIER_AML', TRUE, FALSE, NULL,
-  '00:00','23:59','LUN-DIM',
+  'DOSSIER_AML', TRUE, FALSE, NULL, '00:00','23:59','LUN-DIM',
   'Analyste AML : uniquement les dossiers qui lui sont affectes, 24/7'),
 
 ('AUDIT_lecture_globale',
   (SELECT id_role FROM roles WHERE nom_role='auditeur_senior'),
-  NULL, FALSE, FALSE, NULL,
-  '08:00','20:00','LUN-VEN',
+  NULL, FALSE, FALSE, NULL, '08:00','20:00','LUN-VEN',
   'Auditeur : lecture globale sans filtre pays ni portefeuille'),
 
 ('EXPERT_temporaire',
   (SELECT id_role FROM roles WHERE nom_role='expert_regional'),
-  'INVESTIGATION', TRUE, FALSE, 720,
-  '08:00','18:00','LUN-VEN',
+  'INVESTIGATION', TRUE, FALSE, 720, '08:00','18:00','LUN-VEN',
   'Expert regional : acces borne a 30 jours (720h), revocation automatique'),
 
 ('COMMERCIAL_kpi_seulement',
   (SELECT id_role FROM roles WHERE nom_role='directeur_commercial'),
-  'KPI_COMMERCIAL', FALSE, FALSE, NULL,
-  '08:00','19:00','LUN-VEN',
-  'Cadre commercial : KPIs agreges uniquement, pas de donnees individuelles');
+  'KPI_COMMERCIAL', FALSE, FALSE, NULL, '08:00','19:00','LUN-VEN',
+  'Cadre commercial : KPIs agreges uniquement, pas de donnees individuelles'),
+
+('GUICHET_resp_clients',
+  (SELECT id_role FROM roles WHERE nom_role='guichetier_responsable'),
+  'DONNEES_CLIENT', TRUE, FALSE, NULL, '07:30','18:30','LUN-SAM',
+  'Responsable guichet : acces aux donnees clients de son pays, heures ouverture'),
+
+('GUICHET_resp_operations',
+  (SELECT id_role FROM roles WHERE nom_role='guichetier_responsable'),
+  'OPERATIONS_GUICHET', TRUE, FALSE, NULL, '07:00','19:30','LUN-SAM',
+  'Responsable guichet : gestion et validation des operations guichet de son agence'),
+
+('GUICHET_resp_urgence',
+  (SELECT id_role FROM roles WHERE nom_role='guichetier_responsable'),
+  'OPERATIONS_COURANTES', TRUE, FALSE, 4, '00:00','23:59','LUN-DIM',
+  'Acces exceptionnel 24/7 limite a 4h pour incidents guichet critiques');
 
 
--- -------------------------------------------------------------
--- 8. ACCES TEMPORAIRES (ABAC temporalite + Biba)
--- -------------------------------------------------------------
+-- ==============================================================
+-- PARTIE 9 : ACCÈS TEMPORAIRES
+-- ==============================================================
 
 CREATE TABLE acces_temporaire (
-    id_acces        SERIAL          PRIMARY KEY,
-    id_utilisateur  INT             NOT NULL REFERENCES utilisateurs(id_utilisateur),
-    id_ressource    INT             NOT NULL REFERENCES ressources(id_ressource),
-    justification   TEXT            NOT NULL,
-    date_debut      TIMESTAMP       NOT NULL DEFAULT NOW(),
-    date_fin        TIMESTAMP       NOT NULL,
-    autorise_par    INT             NOT NULL REFERENCES utilisateurs(id_utilisateur),
-    statut          statut_enum     NOT NULL DEFAULT 'ACTIF',
-    revocation_auto BOOLEAN         NOT NULL DEFAULT TRUE,
+    id_acces        SERIAL        PRIMARY KEY,
+    id_utilisateur  INT           NOT NULL REFERENCES utilisateurs(id_utilisateur),
+    id_ressource    INT           NOT NULL REFERENCES ressources(id_ressource),
+    justification   TEXT          NOT NULL,
+    date_debut      TIMESTAMP     NOT NULL DEFAULT NOW(),
+    date_fin        TIMESTAMP     NOT NULL,
+    autorise_par    INT           NOT NULL REFERENCES utilisateurs(id_utilisateur),
+    statut          statut_enum   NOT NULL DEFAULT 'ACTIF',
+    revocation_auto BOOLEAN       NOT NULL DEFAULT TRUE,
     date_revocation TIMESTAMP,
     CONSTRAINT chk_dates CHECK (date_fin > date_debut)
 );
 
+-- Accès temporaire initial : Expert Anna → Investigation ACPR
 INSERT INTO acces_temporaire
   (id_utilisateur, id_ressource, justification, date_debut, date_fin, autorise_par)
-VALUES
-(19,
-  (SELECT id_ressource FROM ressources WHERE reference='INV-REG-2024'),
+VALUES (
+  (SELECT id_utilisateur FROM utilisateurs WHERE matricule='ER001'),
+  (SELECT id_ressource   FROM ressources    WHERE reference='INV-REG-2024'),
   'Investigation reglementaire ACPR 2024 - expertise droit tunisien requise',
-  NOW(),
-  NOW() + INTERVAL '30 days',
-  (SELECT id_utilisateur FROM utilisateurs WHERE matricule='AI002'));
+  NOW(), NOW() + INTERVAL '30 days',
+  (SELECT id_utilisateur FROM utilisateurs WHERE matricule='AI002')
+);
 
 
--- -------------------------------------------------------------
--- 9. CHINESE WALL : HISTORIQUE DES CONSULTATIONS
--- -------------------------------------------------------------
+-- ==============================================================
+-- PARTIE 10 : CHINESE WALL — HISTORIQUE DES CONSULTATIONS
+-- ==============================================================
 
 CREATE TABLE chinese_wall_historique (
-    id              SERIAL          PRIMARY KEY,
-    id_utilisateur  INT             NOT NULL REFERENCES utilisateurs(id_utilisateur),
-    id_ressource    INT             NOT NULL REFERENCES ressources(id_ressource),
-    groupe_conflict VARCHAR(50)     NOT NULL,  -- ex: 'GROUPE_INDUS_A', 'GROUPE_INDUS_B'
-    date_consultation TIMESTAMP    NOT NULL DEFAULT NOW(),
-    -- Une fois consulte, bloque sur le groupe conflictuel
+    id                SERIAL        PRIMARY KEY,
+    id_utilisateur    INT           NOT NULL REFERENCES utilisateurs(id_utilisateur),
+    id_ressource      INT           NOT NULL REFERENCES ressources(id_ressource),
+    groupe_conflict   VARCHAR(50)   NOT NULL,
+    classe_conflict   VARCHAR(50),
+    date_consultation TIMESTAMP     NOT NULL DEFAULT NOW(),
     UNIQUE (id_utilisateur, groupe_conflict)
 );
 
--- Exemple : GP Leblanc a consulte le groupe Industriel Alpha
--- => bloquee sur le groupe Industriel Beta (concurrent)
-INSERT INTO chinese_wall_historique (id_utilisateur, id_ressource, groupe_conflict)
+-- GP Leblanc a consulté le groupe Industriel Alpha → bloquée sur Beta
+-- Analyste risque Eric idem
+INSERT INTO chinese_wall_historique (id_utilisateur, id_ressource, groupe_conflict, classe_conflict)
 VALUES
-(6, (SELECT id_ressource FROM ressources WHERE reference='PTF-FR-GP01'), 'GROUPE_INDUS_ALPHA'),
-(8, (SELECT id_ressource FROM ressources WHERE reference='RISQUE-Q4-24'), 'GROUPE_INDUS_ALPHA');
+((SELECT id_utilisateur FROM utilisateurs WHERE matricule='GP001'),
+ (SELECT id_ressource   FROM ressources    WHERE reference='PTF-FR-GP01'),
+ 'GROUPE_INDUS_ALPHA', 'INDUSTRIE'),
+((SELECT id_utilisateur FROM utilisateurs WHERE matricule='RS001'),
+ (SELECT id_ressource   FROM ressources    WHERE reference='RISQUE-Q4-24'),
+ 'GROUPE_INDUS_ALPHA', 'INDUSTRIE');
 
 
--- -------------------------------------------------------------
--- 10. JOURNAL D'AUDIT (trace toutes les decisions)
--- -------------------------------------------------------------
+-- ==============================================================
+-- PARTIE 11 : JOURNAL D'AUDIT
+-- ==============================================================
 
 CREATE TABLE journal_audit (
-    id_journal      BIGSERIAL       PRIMARY KEY,
-    id_utilisateur  INT             NOT NULL REFERENCES utilisateurs(id_utilisateur),
-    id_ressource    INT             REFERENCES ressources(id_ressource),
+    id_journal      BIGSERIAL     PRIMARY KEY,
+    id_utilisateur  INT           NOT NULL REFERENCES utilisateurs(id_utilisateur),
+    id_ressource    INT           REFERENCES ressources(id_ressource),
     type_ressource  VARCHAR(50),
-    action          action_enum     NOT NULL,
-    decision        decision_enum   NOT NULL,
-    motif_refus     TEXT,           -- rempli si REFUSE
-    modele_bloquant VARCHAR(20),    -- RBAC / ABAC / BLP / BIBA / CW
+    action          action_enum   NOT NULL,
+    decision        decision_enum NOT NULL,
+    motif_refus     TEXT,
+    modele_bloquant VARCHAR(20),
     adresse_ip      INET,
-    horodatage      TIMESTAMP       NOT NULL DEFAULT NOW(),
-    justification   TEXT            -- obligatoire pour N3/N4
+    horodatage      TIMESTAMP     NOT NULL DEFAULT NOW(),
+    justification   TEXT
 );
 
--- Quelques entrees de demonstration
 INSERT INTO journal_audit
-  (id_utilisateur, id_ressource, type_ressource, action, decision, motif_refus, modele_bloquant, adresse_ip, justification)
+  (id_utilisateur, id_ressource, type_ressource, action, decision,
+   motif_refus, modele_bloquant, adresse_ip, justification)
 VALUES
--- Acces autorise : conseiller lit son client
-(1,
-  (SELECT id_ressource FROM ressources WHERE reference='CLI-TN-001'),
-  'DONNEES_CLIENT', 'LIRE', 'AUTORISE',
-  NULL, NULL, '196.20.1.10', NULL),
+-- Autorisé : conseiller lit son client
+((SELECT id_utilisateur FROM utilisateurs WHERE matricule='RC001'),
+ (SELECT id_ressource   FROM ressources    WHERE reference='CLI-TN-001'),
+ 'DONNEES_CLIENT','LIRE','AUTORISE', NULL, NULL, '196.20.1.10', NULL),
 
--- Acces refuse : directeur commercial tente de lire un dossier AML (BLP)
-(17,
-  (SELECT id_ressource FROM ressources WHERE reference='AML-FR-2024-01'),
-  'DOSSIER_AML', 'LIRE', 'REFUSE',
-  'Niveau habilitation insuffisant : N2 < N4 requis', 'BLP',
-  '10.0.1.45', NULL),
+-- Refusé BLP : directeur commercial → dossier AML
+((SELECT id_utilisateur FROM utilisateurs WHERE matricule='CC001'),
+ (SELECT id_ressource   FROM ressources    WHERE reference='AML-FR-2024-01'),
+ 'DOSSIER_AML','LIRE','REFUSE',
+ 'Niveau habilitation insuffisant : N2 < N4 requis','BLP','10.0.1.45', NULL),
 
--- Acces refuse : conseiller RC tente de lire un portefeuille GP (RBAC)
-(1,
-  (SELECT id_ressource FROM ressources WHERE reference='PTF-FR-GP01'),
-  'PORTEFEUILLE', 'LIRE', 'REFUSE',
-  'Role conseiller_particulier non autorise sur PORTEFEUILLE/LIRE', 'RBAC',
-  '196.20.1.10', NULL),
+-- Refusé RBAC : conseiller RC → portefeuille GP
+((SELECT id_utilisateur FROM utilisateurs WHERE matricule='RC001'),
+ (SELECT id_ressource   FROM ressources    WHERE reference='PTF-FR-GP01'),
+ 'PORTEFEUILLE','LIRE','REFUSE',
+ 'Role conseiller_particulier non autorise sur PORTEFEUILLE/LIRE','RBAC','196.20.1.10', NULL),
 
--- Acces autorise : auditeur senior lit journal audit
-(14,
-  (SELECT id_ressource FROM ressources WHERE reference='AUDIT-LOG-01'),
-  'JOURNAL_AUDIT', 'LIRE', 'AUTORISE',
-  NULL, NULL, '10.0.2.5', 'Mission audit trimestrielle Q4 2024'),
+-- Autorisé : auditeur senior lit journal audit
+((SELECT id_utilisateur FROM utilisateurs WHERE matricule='AI002'),
+ (SELECT id_ressource   FROM ressources    WHERE reference='AUDIT-LOG-01'),
+ 'JOURNAL_AUDIT','LIRE','AUTORISE', NULL, NULL, '10.0.2.5',
+ 'Mission audit trimestrielle Q4 2024'),
 
--- Acces refuse : operateur BO tente de modifier analyse risque (Biba - no write up)
-(4,
-  (SELECT id_ressource FROM ressources WHERE reference='RISQUE-Q4-24'),
-  'ANALYSE_RISQUE', 'MODIFIER', 'REFUSE',
-  'Biba no-write-up : utilisateur N1 ne peut pas modifier ressource N3', 'BIBA',
-  '192.168.1.20', NULL),
+-- Refusé Biba : opérateur BO → modifier analyse risque
+((SELECT id_utilisateur FROM utilisateurs WHERE matricule='BO001'),
+ (SELECT id_ressource   FROM ressources    WHERE reference='RISQUE-Q4-24'),
+ 'ANALYSE_RISQUE','MODIFIER','REFUSE',
+ 'Biba no-write-up : utilisateur N1 ne peut pas modifier ressource N3','BIBA','192.168.1.20', NULL),
 
--- Acces refuse : Chinese Wall - GP Sophie bloquee sur groupe concurrent
-(6,
-  (SELECT id_ressource FROM ressources WHERE reference='PTF-TN-GP02'),
-  'PORTEFEUILLE', 'LIRE', 'REFUSE',
-  'Chinese Wall : conflit detecte avec groupe GROUPE_INDUS_ALPHA deja consulte', 'CW',
-  '10.0.1.12', NULL);
+-- Refusé Chinese Wall : GP Sophie → portefeuille concurrent
+((SELECT id_utilisateur FROM utilisateurs WHERE matricule='GP001'),
+ (SELECT id_ressource   FROM ressources    WHERE reference='PTF-TN-GP02'),
+ 'PORTEFEUILLE','LIRE','REFUSE',
+ 'Chinese Wall : conflit detecte avec GROUPE_INDUS_ALPHA deja consulte','CW','10.0.1.12', NULL),
+
+-- Guichetier autorisé : validation cloture de caisse
+((SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR001'),
+ (SELECT id_ressource   FROM ressources    WHERE reference='GUICHET-TN-2024'),
+ 'OPERATIONS_GUICHET','VALIDER','AUTORISE', NULL, NULL, '196.20.5.21',
+ 'Validation cloture de caisse journee - agence Tunis Centre'),
+
+-- Guichetier refusé BLP : tentative lecture dossier AML
+((SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR002'),
+ (SELECT id_ressource   FROM ressources    WHERE reference='AML-FR-2024-01'),
+ 'DOSSIER_AML','LIRE','REFUSE',
+ 'Niveau habilitation insuffisant : N2 < N4 requis','BLP','10.0.8.33', NULL),
+
+-- Guichetier refusé RBAC : tentative modification portefeuille
+((SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR002'),
+ (SELECT id_ressource   FROM ressources    WHERE reference='PTF-FR-GP01'),
+ 'PORTEFEUILLE','MODIFIER','REFUSE',
+ 'Role guichetier_responsable non autorise sur PORTEFEUILLE/MODIFIER','RBAC','10.0.8.33', NULL);
 
 
--- -------------------------------------------------------------
--- 11. VUES UTILES
--- -------------------------------------------------------------
+-- ==============================================================
+-- PARTIE 12 : INDEX DE PERFORMANCE
+-- ==============================================================
 
--- Vue : droits effectifs d'un utilisateur (RBAC)
+CREATE INDEX idx_ur_user_actif     ON utilisateur_roles(id_utilisateur, actif);
+CREATE INDEX idx_ur_role           ON utilisateur_roles(id_role);
+CREATE INDEX idx_rp_role_perm      ON role_permissions(id_role, id_permission);
+CREATE INDEX idx_blp_user          ON blp_habilitations(id_utilisateur);
+CREATE INDEX idx_cw_user_groupe    ON chinese_wall_historique(id_utilisateur, groupe_conflict);
+CREATE INDEX idx_cw_user_classe    ON chinese_wall_historique(id_utilisateur, classe_conflict);
+CREATE INDEX idx_ressources_actif  ON ressources(actif, type_ressource);
+CREATE INDEX idx_ressources_ref    ON ressources(reference) WHERE actif = TRUE;
+CREATE INDEX idx_journal_user_date ON journal_audit(id_utilisateur, horodatage DESC);
+CREATE INDEX idx_journal_decision  ON journal_audit(decision, modele_bloquant);
+CREATE INDEX idx_at_user_statut    ON acces_temporaire(id_utilisateur, statut);
+CREATE INDEX idx_at_expiry         ON acces_temporaire(statut, date_fin) WHERE statut = 'ACTIF';
+
+
+-- ==============================================================
+-- PARTIE 13 : VUES UTILES
+-- ==============================================================
+
+-- 13.1  Droits effectifs d'un utilisateur (RBAC)
 CREATE OR REPLACE VIEW v_droits_utilisateur AS
 SELECT
     u.matricule,
@@ -678,200 +1010,271 @@ SELECT
     p.niveau_min                AS niveau_requis,
     h.niveau_max                AS niveau_habilite
 FROM utilisateurs u
-JOIN utilisateur_roles ur   ON u.id_utilisateur = ur.id_utilisateur AND ur.actif = TRUE
-JOIN roles r                ON ur.id_role = r.id_role
-JOIN equipes e              ON r.id_equipe = e.id_equipe
-JOIN role_permissions rp    ON r.id_role = rp.id_role
-JOIN permissions p          ON rp.id_permission = p.id_permission
-JOIN blp_habilitations h    ON u.id_utilisateur = h.id_utilisateur
+JOIN utilisateur_roles ur ON u.id_utilisateur = ur.id_utilisateur AND ur.actif = TRUE
+JOIN roles         r      ON ur.id_role = r.id_role
+JOIN equipes       e      ON r.id_equipe = e.id_equipe
+JOIN role_permissions rp  ON r.id_role = rp.id_role
+JOIN permissions   p      ON rp.id_permission = p.id_permission
+JOIN blp_habilitations h  ON u.id_utilisateur = h.id_utilisateur
 WHERE u.statut = 'ACTIF'
   AND (ur.date_fin IS NULL OR ur.date_fin >= CURRENT_DATE);
 
-
--- Vue : acces refus par modele (tableau de bord securite)
+-- 13.2  Refus par modèle (tableau de bord sécurité)
 CREATE OR REPLACE VIEW v_refus_par_modele AS
 SELECT
     modele_bloquant,
-    COUNT(*)                    AS nb_refus,
-    COUNT(DISTINCT id_utilisateur) AS utilisateurs_concernes,
-    MAX(horodatage)             AS dernier_refus
+    COUNT(*)                         AS nb_refus,
+    COUNT(DISTINCT id_utilisateur)   AS utilisateurs_concernes,
+    MAX(horodatage)                  AS dernier_refus
 FROM journal_audit
 WHERE decision = 'REFUSE'
 GROUP BY modele_bloquant
 ORDER BY nb_refus DESC;
 
-
--- Vue : acces temporaires actifs
+-- 13.3  Accès temporaires encore actifs
 CREATE OR REPLACE VIEW v_acces_temporaires_actifs AS
 SELECT
     u.matricule,
-    u.nom || ' ' || u.prenom   AS utilisateur,
-    res.reference               AS ressource,
+    u.nom || ' ' || u.prenom                          AS utilisateur,
+    res.reference                                      AS ressource,
     res.type_ressource,
     at.justification,
     at.date_debut,
     at.date_fin,
-    EXTRACT(EPOCH FROM (at.date_fin - NOW()))/3600 AS heures_restantes,
-    a.nom || ' ' || a.prenom   AS autorise_par
+    ROUND(EXTRACT(EPOCH FROM (at.date_fin - NOW()))/3600::NUMERIC, 1)
+                                                       AS heures_restantes,
+    a.nom || ' ' || a.prenom                           AS autorise_par
 FROM acces_temporaire at
-JOIN utilisateurs u     ON at.id_utilisateur = u.id_utilisateur
-JOIN ressources res     ON at.id_ressource = res.id_ressource
-JOIN utilisateurs a     ON at.autorise_par = a.id_utilisateur
-WHERE at.statut = 'ACTIF'
+JOIN utilisateurs u   ON at.id_utilisateur = u.id_utilisateur
+JOIN ressources   res ON at.id_ressource   = res.id_ressource
+JOIN utilisateurs a   ON at.autorise_par   = a.id_utilisateur
+WHERE at.statut   = 'ACTIF'
   AND at.date_fin > NOW();
 
-
--- Vue : alertes Chinese Wall actives
+-- 13.4  Alertes Chinese Wall
 CREATE OR REPLACE VIEW v_chinese_wall_alertes AS
 SELECT
     u.matricule,
     u.nom || ' ' || u.prenom   AS utilisateur,
     e.nom                       AS equipe,
     cwh.groupe_conflict         AS groupe_consulte,
+    cwh.classe_conflict,
     cwh.date_consultation,
-    'Bloque sur groupes conflictuels'::TEXT AS statut
+    'Bloque sur groupes conflictuels de meme classe'::TEXT AS statut
 FROM chinese_wall_historique cwh
 JOIN utilisateurs u ON cwh.id_utilisateur = u.id_utilisateur
-JOIN equipes e      ON u.id_equipe = e.id_equipe;
+JOIN equipes      e ON u.id_equipe        = e.id_equipe;
 
 
--- -------------------------------------------------------------
--- 12. FONCTIONS DE CONTROLE D'ACCES
--- -------------------------------------------------------------
+-- ==============================================================
+-- PARTIE 14 : FONCTIONS DE VÉRIFICATION (CORRIGÉES)
+-- ==============================================================
 
--- 12.1  Verification RBAC
+-- 14.1  Vérification RBAC
 CREATE OR REPLACE FUNCTION verifier_rbac(
     p_id_utilisateur INT,
     p_type_ressource VARCHAR,
     p_action         action_enum
-) RETURNS BOOLEAN AS $$
-DECLARE
-    v_autorise BOOLEAN := FALSE;
+) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$
 BEGIN
-    SELECT EXISTS (
+    RETURN EXISTS (
         SELECT 1
-        FROM utilisateur_roles ur
-        JOIN role_permissions rp ON ur.id_role = rp.id_role
-        JOIN permissions p       ON rp.id_permission = p.id_permission
-        WHERE ur.id_utilisateur = p_id_utilisateur
-          AND ur.actif = TRUE
-          AND (ur.date_fin IS NULL OR ur.date_fin >= CURRENT_DATE)
-          AND p.ressource_type = p_type_ressource
-          AND p.action = p_action
-    ) INTO v_autorise;
-    RETURN v_autorise;
+        FROM   utilisateur_roles ur
+        JOIN   role_permissions  rp ON ur.id_role       = rp.id_role
+        JOIN   permissions       p  ON rp.id_permission = p.id_permission
+        WHERE  ur.id_utilisateur = p_id_utilisateur
+          AND  ur.actif = TRUE
+          AND  (ur.date_fin IS NULL OR ur.date_fin >= CURRENT_DATE)
+          AND  p.ressource_type = p_type_ressource
+          AND  p.action         = p_action
+    );
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
 
--- 12.2  Verification BLP (confidentialite)
+-- 14.2  Vérification BLP (confidentialité) — no-read-up / no-write-down
 CREATE OR REPLACE FUNCTION verifier_blp(
-    p_id_utilisateur INT,
+    p_id_utilisateur   INT,
     p_niveau_ressource niveau_enum,
     p_action           action_enum
-) RETURNS BOOLEAN AS $$
+) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$
 DECLARE
     v_niveau_user niveau_enum;
-    v_ordre_user  INT;
-    v_ordre_res   INT;
+    v_ord_user    INT;
+    v_ord_res     INT;
 BEGIN
     SELECT niveau_max INTO v_niveau_user
-    FROM blp_habilitations
-    WHERE id_utilisateur = p_id_utilisateur;
+    FROM   blp_habilitations
+    WHERE  id_utilisateur = p_id_utilisateur;
 
     IF v_niveau_user IS NULL THEN RETURN FALSE; END IF;
 
-    -- Ordre numerique des niveaux
-    v_ordre_user := CASE v_niveau_user
+    v_ord_user := CASE v_niveau_user
         WHEN 'N1' THEN 1 WHEN 'N2' THEN 2
-        WHEN 'N3' THEN 3 WHEN 'N4' THEN 4
-    END;
-    v_ordre_res := CASE p_niveau_ressource
+        WHEN 'N3' THEN 3 WHEN 'N4' THEN 4 END;
+    v_ord_res  := CASE p_niveau_ressource
         WHEN 'N1' THEN 1 WHEN 'N2' THEN 2
-        WHEN 'N3' THEN 3 WHEN 'N4' THEN 4
-    END;
+        WHEN 'N3' THEN 3 WHEN 'N4' THEN 4 END;
 
-    -- No read up : l'utilisateur ne peut pas lire au-dessus de son niveau
-    IF p_action IN ('LIRE','EXPORTER') AND v_ordre_user < v_ordre_res THEN
+    -- No read-up : ne peut pas lire au-dessus de son niveau
+    IF p_action IN ('LIRE','EXPORTER') AND v_ord_user < v_ord_res THEN
         RETURN FALSE;
     END IF;
-    -- No write down : l'utilisateur ne peut pas ecrire en dessous de son niveau
-    IF p_action IN ('ECRIRE','MODIFIER','SUPPRIMER') AND v_ordre_user > v_ordre_res THEN
+    -- No write-down : ne peut pas écrire en dessous de son niveau
+    IF p_action IN ('ECRIRE','MODIFIER','SUPPRIMER') AND v_ord_user > v_ord_res THEN
         RETURN FALSE;
     END IF;
     RETURN TRUE;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
 
--- 12.3  Verification Biba (integrite)
+-- 14.3  Vérification Biba (intégrité) — no-write-up
 CREATE OR REPLACE FUNCTION verifier_biba(
     p_id_utilisateur   INT,
     p_niveau_ressource niveau_enum,
     p_action           action_enum
-) RETURNS BOOLEAN AS $$
+) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$
 DECLARE
     v_niveau_user niveau_enum;
-    v_ordre_user  INT;
-    v_ordre_res   INT;
+    v_ord_user    INT;
+    v_ord_res     INT;
 BEGIN
     SELECT niveau_max INTO v_niveau_user
-    FROM blp_habilitations
-    WHERE id_utilisateur = p_id_utilisateur;
+    FROM   blp_habilitations
+    WHERE  id_utilisateur = p_id_utilisateur;
 
     IF v_niveau_user IS NULL THEN RETURN FALSE; END IF;
 
-    v_ordre_user := CASE v_niveau_user
+    v_ord_user := CASE v_niveau_user
         WHEN 'N1' THEN 1 WHEN 'N2' THEN 2
-        WHEN 'N3' THEN 3 WHEN 'N4' THEN 4
-    END;
-    v_ordre_res := CASE p_niveau_ressource
+        WHEN 'N3' THEN 3 WHEN 'N4' THEN 4 END;
+    v_ord_res  := CASE p_niveau_ressource
         WHEN 'N1' THEN 1 WHEN 'N2' THEN 2
-        WHEN 'N3' THEN 3 WHEN 'N4' THEN 4
-    END;
+        WHEN 'N3' THEN 3 WHEN 'N4' THEN 4 END;
 
-    -- No write up : un utilisateur ne peut pas ecrire au-dessus de son niveau
-    IF p_action IN ('ECRIRE','MODIFIER','SUPPRIMER','VALIDER') AND v_ordre_user < v_ordre_res THEN
+    -- No write-up : un utilisateur bas niveau ne modifie pas des données de niveau supérieur
+    IF p_action IN ('ECRIRE','MODIFIER','SUPPRIMER','VALIDER') AND v_ord_user < v_ord_res THEN
         RETURN FALSE;
     END IF;
-    -- No read down : un utilisateur de haut niveau ne lit pas le bas (optionnel strict)
-    -- Desactive ici pour compatibilite operationnelle (audit doit tout lire)
     RETURN TRUE;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
 
--- 12.4  Verification Chinese Wall
+-- 14.4  Vérification ABAC (contexte : heure, jour, pays)
+--       Retourne TRUE si toutes les politiques applicables sont respectées
+CREATE OR REPLACE FUNCTION verifier_abac(
+    p_id_utilisateur INT,
+    p_id_ressource   INT,
+    p_action         action_enum
+) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$
+DECLARE
+    v_type_ressource  VARCHAR(50);
+    v_code_pays_res   CHAR(2);
+    v_code_pays_user  CHAR(2);
+    v_heure_courante  TIME    := LOCALTIME;
+    v_jour_courant    INT     := EXTRACT(ISODOW FROM NOW()); -- 1=lun, 7=dim
+    v_politique       RECORD;
+    v_jour_debut      INT;
+    v_jour_fin        INT;
+BEGIN
+    SELECT type_ressource, code_pays INTO v_type_ressource, v_code_pays_res
+    FROM   ressources WHERE id_ressource = p_id_ressource;
+
+    SELECT code_pays INTO v_code_pays_user
+    FROM   utilisateurs WHERE id_utilisateur = p_id_utilisateur;
+
+    -- Parcourir toutes les politiques ABAC applicables au rôle de l'utilisateur
+    FOR v_politique IN
+        SELECT ap.*
+        FROM   abac_politiques ap
+        JOIN   utilisateur_roles ur ON ap.id_role = ur.id_role
+        WHERE  ur.id_utilisateur = p_id_utilisateur
+          AND  ur.actif = TRUE
+          AND  (ap.type_ressource IS NULL OR ap.type_ressource = v_type_ressource)
+    LOOP
+        -- Vérification filtre pays
+        IF v_politique.filtre_pays AND v_code_pays_res IS NOT NULL
+           AND v_code_pays_res != v_code_pays_user THEN
+            RETURN FALSE;
+        END IF;
+
+        -- Vérification fenêtre horaire
+        IF v_politique.heure_debut IS NOT NULL AND v_politique.heure_fin IS NOT NULL THEN
+            IF v_heure_courante < v_politique.heure_debut
+            OR v_heure_courante > v_politique.heure_fin THEN
+                RETURN FALSE;
+            END IF;
+        END IF;
+
+        -- Vérification jour de la semaine
+        IF v_politique.jours_semaine IS NOT NULL THEN
+            v_jour_debut := CASE SPLIT_PART(v_politique.jours_semaine,'-',1)
+                WHEN 'LUN' THEN 1 WHEN 'MAR' THEN 2 WHEN 'MER' THEN 3
+                WHEN 'JEU' THEN 4 WHEN 'VEN' THEN 5 WHEN 'SAM' THEN 6
+                WHEN 'DIM' THEN 7 ELSE 1 END;
+            v_jour_fin   := CASE SPLIT_PART(v_politique.jours_semaine,'-',2)
+                WHEN 'LUN' THEN 1 WHEN 'MAR' THEN 2 WHEN 'MER' THEN 3
+                WHEN 'JEU' THEN 4 WHEN 'VEN' THEN 5 WHEN 'SAM' THEN 6
+                WHEN 'DIM' THEN 7 ELSE 7 END;
+            IF v_jour_courant < v_jour_debut OR v_jour_courant > v_jour_fin THEN
+                RETURN FALSE;
+            END IF;
+        END IF;
+    END LOOP;
+
+    RETURN TRUE;
+END;
+$$;
+
+
+-- 14.5  Vérification Chinese Wall (CORRIGÉE — bloque vraiment les conflits)
 CREATE OR REPLACE FUNCTION verifier_chinese_wall(
     p_id_utilisateur INT,
     p_id_ressource   INT
-) RETURNS BOOLEAN AS $$
+) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$
 DECLARE
     v_groupe_ressource VARCHAR(50);
+    v_classe_ressource VARCHAR(50);
 BEGIN
-    -- Recuperer le groupe de conflit de la ressource demandee
-    -- (En production, la table ressources aurait une colonne groupe_conflict)
-    -- Ici on verifie si l'utilisateur a deja consulte un groupe conflictuel
-    SELECT groupe_conflict INTO v_groupe_ressource
-    FROM chinese_wall_historique
-    WHERE id_utilisateur = p_id_utilisateur
-      AND id_ressource = p_id_ressource
-    LIMIT 1;
+    -- Récupérer le groupe et la classe de conflit de la ressource demandée
+    SELECT groupe_conflict, classe_conflict
+    INTO   v_groupe_ressource, v_classe_ressource
+    FROM   ressources
+    WHERE  id_ressource = p_id_ressource;
 
-    -- Si aucun conflit enregistre, acces autorise
+    -- Ressource sans groupe de conflit → pas de mur applicable
     IF v_groupe_ressource IS NULL THEN
         RETURN TRUE;
     END IF;
 
-    -- Si le meme groupe : autoriser (on l'a deja consulte)
-    -- Si groupe different dans meme classe de conflit : refuser
-    -- Logique simplifiee : si l'utilisateur est dans le registre pour ce groupe, OK
+    -- Vérifier si l'utilisateur a déjà accédé à un GROUPE DIFFÉRENT
+    -- dans la MÊME CLASSE de conflit
+    IF EXISTS (
+        SELECT 1
+        FROM   chinese_wall_historique cwh
+        WHERE  cwh.id_utilisateur  = p_id_utilisateur
+          AND  cwh.classe_conflict = v_classe_ressource
+          AND  cwh.groupe_conflict != v_groupe_ressource
+    ) THEN
+        -- Conflit d'intérêt détecté → REFUS
+        RETURN FALSE;
+    END IF;
+
+    -- Pas de conflit → autoriser ET enregistrer la consultation
+    INSERT INTO chinese_wall_historique
+      (id_utilisateur, id_ressource, groupe_conflict, classe_conflict)
+    VALUES
+      (p_id_utilisateur, p_id_ressource, v_groupe_ressource, v_classe_ressource)
+    ON CONFLICT (id_utilisateur, groupe_conflict) DO NOTHING;
+
     RETURN TRUE;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
 
--- 12.5  Fonction principale de decision d'acces (orchestre tous les modeles)
+-- 14.6  Fonction principale de décision d'accès (orchestre toutes les couches)
 CREATE OR REPLACE FUNCTION controler_acces(
     p_id_utilisateur INT,
     p_id_ressource   INT,
@@ -881,382 +1284,739 @@ CREATE OR REPLACE FUNCTION controler_acces(
     decision        decision_enum,
     modele_bloquant VARCHAR,
     message         TEXT
-) AS $$
+) LANGUAGE plpgsql AS $$
 DECLARE
-    v_type_ressource VARCHAR(50);
+    v_type_ressource   VARCHAR(50);
     v_niveau_ressource niveau_enum;
-    v_statut_user    statut_enum;
-    v_mfa_requis     BOOLEAN;
-    v_mfa_actif      BOOLEAN;
+    v_statut_user      statut_enum;
+    v_mfa_requis       BOOLEAN;
+    v_mfa_actif        BOOLEAN;
+    v_decision         decision_enum;
+    v_modele           VARCHAR;
+    v_message          TEXT;
 BEGIN
-    -- Recuperer infos ressource
+    -- Récupérer les infos de la ressource
     SELECT type_ressource, niveau_requis
-    INTO v_type_ressource, v_niveau_ressource
-    FROM ressources WHERE id_ressource = p_id_ressource AND actif = TRUE;
+    INTO   v_type_ressource, v_niveau_ressource
+    FROM   ressources
+    WHERE  id_ressource = p_id_ressource AND actif = TRUE;
 
     IF NOT FOUND THEN
-        RETURN QUERY SELECT 'REFUSE'::decision_enum, 'SYSTEME'::VARCHAR,
-            'Ressource introuvable ou inactive'::TEXT;
-        RETURN;
+        v_decision := 'REFUSE'; v_modele := 'SYSTEME';
+        v_message  := 'Ressource introuvable ou inactive';
+        INSERT INTO journal_audit
+          (id_utilisateur, id_ressource, type_ressource, action, decision, modele_bloquant, horodatage)
+        VALUES (p_id_utilisateur, p_id_ressource, 'INCONNU', p_action, v_decision, v_modele, NOW());
+        RETURN QUERY SELECT v_decision, v_modele, v_message; RETURN;
     END IF;
 
-    -- Verifier statut utilisateur
+    -- Vérifier le statut de l'utilisateur
     SELECT statut, mfa_actif INTO v_statut_user, v_mfa_actif
-    FROM utilisateurs WHERE id_utilisateur = p_id_utilisateur;
+    FROM   utilisateurs WHERE id_utilisateur = p_id_utilisateur;
 
     IF v_statut_user != 'ACTIF' THEN
-        RETURN QUERY SELECT 'REFUSE'::decision_enum, 'SYSTEME'::VARCHAR,
-            'Utilisateur inactif ou suspendu'::TEXT;
-        RETURN;
+        v_decision := 'REFUSE'; v_modele := 'SYSTEME';
+        v_message  := 'Utilisateur inactif ou suspendu';
+        INSERT INTO journal_audit
+          (id_utilisateur, id_ressource, type_ressource, action, decision,
+           modele_bloquant, motif_refus, horodatage)
+        VALUES (p_id_utilisateur, p_id_ressource, v_type_ressource, p_action,
+                v_decision, v_modele, v_message, NOW());
+        RETURN QUERY SELECT v_decision, v_modele, v_message; RETURN;
     END IF;
 
-    -- Verifier MFA si niveau N3/N4
-    SELECT mfa_requis INTO v_mfa_requis FROM niveaux_securite WHERE niveau = v_niveau_ressource;
+    -- Vérification MFA (obligatoire pour N3/N4)
+    SELECT mfa_requis INTO v_mfa_requis
+    FROM   niveaux_securite WHERE niveau = v_niveau_ressource;
+
     IF v_mfa_requis AND NOT v_mfa_actif THEN
-        RETURN QUERY SELECT 'REFUSE'::decision_enum, 'AUTH'::VARCHAR,
-            'MFA obligatoire pour ce niveau de securite'::TEXT;
-        RETURN;
+        v_decision := 'REFUSE'; v_modele := 'AUTH';
+        v_message  := 'MFA obligatoire pour niveau ' || v_niveau_ressource;
+        INSERT INTO journal_audit
+          (id_utilisateur, id_ressource, type_ressource, action, decision,
+           modele_bloquant, motif_refus, horodatage)
+        VALUES (p_id_utilisateur, p_id_ressource, v_type_ressource, p_action,
+                v_decision, v_modele, v_message, NOW());
+        RETURN QUERY SELECT v_decision, v_modele, v_message; RETURN;
     END IF;
 
     -- Justification obligatoire pour N3/N4
-    IF v_niveau_ressource IN ('N3','N4') AND (p_justification IS NULL OR p_justification = '') THEN
-        RETURN QUERY SELECT 'REFUSE'::decision_enum, 'POLITIQUE'::VARCHAR,
-            'Justification metier obligatoire pour niveau N3/N4'::TEXT;
-        RETURN;
+    IF v_niveau_ressource IN ('N3','N4')
+       AND (p_justification IS NULL OR p_justification = '') THEN
+        v_decision := 'REFUSE'; v_modele := 'POLITIQUE';
+        v_message  := 'Justification metier obligatoire pour niveau ' || v_niveau_ressource;
+        INSERT INTO journal_audit
+          (id_utilisateur, id_ressource, type_ressource, action, decision,
+           modele_bloquant, motif_refus, horodatage)
+        VALUES (p_id_utilisateur, p_id_ressource, v_type_ressource, p_action,
+                v_decision, v_modele, v_message, NOW());
+        RETURN QUERY SELECT v_decision, v_modele, v_message; RETURN;
     END IF;
 
     -- Couche 1 : RBAC
     IF NOT verifier_rbac(p_id_utilisateur, v_type_ressource, p_action) THEN
-        RETURN QUERY SELECT 'REFUSE'::decision_enum, 'RBAC'::VARCHAR,
-            'Role insuffisant pour cette ressource/action'::TEXT;
-        RETURN;
+        v_decision := 'REFUSE'; v_modele := 'RBAC';
+        v_message  := 'Role insuffisant pour ' || v_type_ressource || '/' || p_action;
+        INSERT INTO journal_audit
+          (id_utilisateur, id_ressource, type_ressource, action, decision,
+           modele_bloquant, motif_refus, horodatage, justification)
+        VALUES (p_id_utilisateur, p_id_ressource, v_type_ressource, p_action,
+                v_decision, v_modele, v_message, NOW(), p_justification);
+        RETURN QUERY SELECT v_decision, v_modele, v_message; RETURN;
     END IF;
 
     -- Couche 2 : BLP
     IF NOT verifier_blp(p_id_utilisateur, v_niveau_ressource, p_action) THEN
-        RETURN QUERY SELECT 'REFUSE'::decision_enum, 'BLP'::VARCHAR,
-            'Violation Bell-LaPadula : no-read-up ou no-write-down'::TEXT;
-        RETURN;
+        v_decision := 'REFUSE'; v_modele := 'BLP';
+        v_message  := 'Violation Bell-LaPadula : no-read-up ou no-write-down';
+        INSERT INTO journal_audit
+          (id_utilisateur, id_ressource, type_ressource, action, decision,
+           modele_bloquant, motif_refus, horodatage, justification)
+        VALUES (p_id_utilisateur, p_id_ressource, v_type_ressource, p_action,
+                v_decision, v_modele, v_message, NOW(), p_justification);
+        RETURN QUERY SELECT v_decision, v_modele, v_message; RETURN;
     END IF;
 
     -- Couche 3 : Biba
     IF NOT verifier_biba(p_id_utilisateur, v_niveau_ressource, p_action) THEN
-        RETURN QUERY SELECT 'REFUSE'::decision_enum, 'BIBA'::VARCHAR,
-            'Violation Biba : no-write-up interdit'::TEXT;
-        RETURN;
+        v_decision := 'REFUSE'; v_modele := 'BIBA';
+        v_message  := 'Violation Biba : no-write-up interdit';
+        INSERT INTO journal_audit
+          (id_utilisateur, id_ressource, type_ressource, action, decision,
+           modele_bloquant, motif_refus, horodatage, justification)
+        VALUES (p_id_utilisateur, p_id_ressource, v_type_ressource, p_action,
+                v_decision, v_modele, v_message, NOW(), p_justification);
+        RETURN QUERY SELECT v_decision, v_modele, v_message; RETURN;
     END IF;
 
-    -- Couche 4 : Chinese Wall
+    -- Couche 4 : ABAC (contexte : heure, jour, pays)
+    IF NOT verifier_abac(p_id_utilisateur, p_id_ressource, p_action) THEN
+        v_decision := 'REFUSE'; v_modele := 'ABAC';
+        v_message  := 'Violation ABAC : heure, jour ou pays non autorise';
+        INSERT INTO journal_audit
+          (id_utilisateur, id_ressource, type_ressource, action, decision,
+           modele_bloquant, motif_refus, horodatage, justification)
+        VALUES (p_id_utilisateur, p_id_ressource, v_type_ressource, p_action,
+                v_decision, v_modele, v_message, NOW(), p_justification);
+        RETURN QUERY SELECT v_decision, v_modele, v_message; RETURN;
+    END IF;
+
+    -- Couche 5 : Chinese Wall
     IF NOT verifier_chinese_wall(p_id_utilisateur, p_id_ressource) THEN
-        RETURN QUERY SELECT 'REFUSE'::decision_enum, 'CHINESE_WALL'::VARCHAR,
-            'Conflit d interet detecte (Chinese Wall)'::TEXT;
-        RETURN;
+        v_decision := 'REFUSE'; v_modele := 'CHINESE_WALL';
+        v_message  := 'Conflit d interet detecte (Chinese Wall)';
+        INSERT INTO journal_audit
+          (id_utilisateur, id_ressource, type_ressource, action, decision,
+           modele_bloquant, motif_refus, horodatage, justification)
+        VALUES (p_id_utilisateur, p_id_ressource, v_type_ressource, p_action,
+                v_decision, v_modele, v_message, NOW(), p_justification);
+        RETURN QUERY SELECT v_decision, v_modele, v_message; RETURN;
     END IF;
 
-    -- Toutes les couches validees
+    -- Toutes les couches validées → AUTORISÉ
+    INSERT INTO journal_audit
+      (id_utilisateur, id_ressource, type_ressource, action, decision,
+       horodatage, justification)
+    VALUES (p_id_utilisateur, p_id_ressource, v_type_ressource, p_action,
+            'AUTORISE', NOW(), p_justification);
+
     RETURN QUERY SELECT 'AUTORISE'::decision_enum, NULL::VARCHAR,
         'Acces accorde - toutes les politiques validees'::TEXT;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
 
--- -------------------------------------------------------------
--- 13. TRIGGER : JOURNALISATION AUTOMATIQUE
--- -------------------------------------------------------------
+-- ==============================================================
+-- PARTIE 15 : RÔLES POSTGRESQL + GRANTS
+-- ==============================================================
 
-CREATE OR REPLACE FUNCTION trigger_journal_acces()
-RETURNS TRIGGER AS $$
+-- 15.1  Créer les rôles fonctionnels PostgreSQL
+CREATE ROLE banque_employe    NOLOGIN;
+CREATE ROLE banque_controle   NOLOGIN;
+CREATE ROLE banque_rc         NOLOGIN;
+CREATE ROLE banque_bo         NOLOGIN;
+CREATE ROLE banque_gp         NOLOGIN;
+CREATE ROLE banque_risque     NOLOGIN;
+CREATE ROLE banque_aml        NOLOGIN;
+CREATE ROLE banque_audit      NOLOGIN;
+CREATE ROLE banque_juridique  NOLOGIN;
+CREATE ROLE banque_commercial NOLOGIN;
+CREATE ROLE banque_expert     NOLOGIN;
+CREATE ROLE banque_support    NOLOGIN;
+CREATE ROLE banque_app        NOLOGIN;
+CREATE ROLE banque_dba        NOLOGIN;
+CREATE ROLE banque_readonly   NOLOGIN;
+
+-- 15.2  Hiérarchie d'héritage
+GRANT banque_employe TO
+    banque_rc, banque_bo, banque_gp, banque_risque,
+    banque_aml, banque_audit, banque_juridique,
+    banque_commercial, banque_expert, banque_support;
+GRANT banque_employe  TO banque_controle;
+GRANT banque_controle TO banque_aml, banque_audit, banque_juridique;
+
+-- 15.3  Schéma
+GRANT USAGE ON SCHEMA public TO
+    banque_employe, banque_app, banque_dba, banque_readonly;
+
+-- 15.4  Tables de référence (lecture pour tous)
+GRANT SELECT ON
+    niveaux_securite, pays, equipes, roles, permissions
+TO banque_employe;
+
+-- 15.5  RBAC — lecture (les écritures passent par les fonctions)
+GRANT SELECT ON role_permissions, utilisateur_roles TO banque_employe;
+
+-- 15.6  Utilisateurs, ressources, habilitations — lecture
+GRANT SELECT ON utilisateurs, ressources, blp_habilitations, abac_politiques TO banque_employe;
+
+-- 15.7  Accès temporaires et Chinese Wall — lecture
+GRANT SELECT ON acces_temporaire, chinese_wall_historique TO banque_employe;
+
+-- 15.8  Journal d'audit — seulement les équipes de contrôle en lecture directe
+GRANT SELECT ON journal_audit TO banque_audit, banque_aml, banque_juridique, banque_readonly;
+
+-- 15.9  Compte applicatif — SELECT sur tout + écriture dans les tables transactionnelles
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO banque_app;
+GRANT INSERT ON journal_audit, chinese_wall_historique, acces_temporaire TO banque_app;
+GRANT UPDATE ON acces_temporaire, utilisateurs, blp_habilitations, utilisateur_roles TO banque_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO banque_app;
+
+-- 15.10 DBA — accès complet
+GRANT ALL ON ALL TABLES    IN SCHEMA public TO banque_dba;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO banque_dba;
+
+-- 15.11 Readonly (auditeur externe)
+GRANT SELECT ON
+    journal_audit, utilisateurs, roles, equipes, permissions,
+    role_permissions, utilisateur_roles, ressources, blp_habilitations
+TO banque_readonly;
+
+-- 15.12 Grants sur les fonctions
+GRANT EXECUTE ON FUNCTION controler_acces(INT, INT, action_enum, TEXT)
+    TO banque_employe, banque_app;
+
+GRANT EXECUTE ON FUNCTION verifier_rbac(INT, VARCHAR, action_enum)      TO banque_app, banque_dba;
+GRANT EXECUTE ON FUNCTION verifier_blp(INT, niveau_enum, action_enum)   TO banque_app, banque_dba;
+GRANT EXECUTE ON FUNCTION verifier_biba(INT, niveau_enum, action_enum)  TO banque_app, banque_dba;
+GRANT EXECUTE ON FUNCTION verifier_abac(INT, INT, action_enum)          TO banque_app, banque_dba;
+GRANT EXECUTE ON FUNCTION verifier_chinese_wall(INT, INT)               TO banque_app, banque_dba;
+
+-- 15.13 Grants sur les vues
+GRANT SELECT ON v_droits_utilisateur      TO banque_audit, banque_dba, banque_readonly;
+GRANT SELECT ON v_refus_par_modele        TO banque_audit, banque_aml, banque_dba;
+GRANT SELECT ON v_acces_temporaires_actifs TO banque_audit, banque_dba;
+GRANT SELECT ON v_chinese_wall_alertes    TO banque_audit, banque_aml, banque_dba;
+
+
+-- ==============================================================
+-- PARTIE 16 : ROW LEVEL SECURITY (RLS)
+-- ==============================================================
+
+-- Fonction utilitaire : id de l'utilisateur connecté
+CREATE OR REPLACE FUNCTION current_user_id() RETURNS INT
+LANGUAGE sql STABLE SECURITY DEFINER AS $$
+    SELECT id_utilisateur
+    FROM   utilisateurs
+    WHERE  matricule = UPPER(SPLIT_PART(current_user, '_', 2))
+      AND  statut    = 'ACTIF'
+    LIMIT 1;
+$$;
+GRANT EXECUTE ON FUNCTION current_user_id() TO banque_employe, banque_app;
+
+-- Activer RLS
+ALTER TABLE utilisateurs            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ressources              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE journal_audit           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE chinese_wall_historique ENABLE ROW LEVEL SECURITY;
+ALTER TABLE utilisateurs            FORCE ROW LEVEL SECURITY;
+ALTER TABLE ressources              FORCE ROW LEVEL SECURITY;
+ALTER TABLE journal_audit           FORCE ROW LEVEL SECURITY;
+ALTER TABLE chinese_wall_historique FORCE ROW LEVEL SECURITY;
+
+-- Politiques RLS
+CREATE POLICY rls_utilisateurs_self ON utilisateurs FOR SELECT
+USING (
+    id_utilisateur = current_user_id()
+    OR pg_has_role(current_user, 'banque_audit',   'MEMBER')
+    OR pg_has_role(current_user, 'banque_dba',     'MEMBER')
+    OR pg_has_role(current_user, 'banque_readonly', 'MEMBER')
+);
+
+CREATE POLICY rls_ressources_pays ON ressources FOR SELECT
+USING (
+    code_pays IS NULL
+    OR code_pays = (SELECT code_pays FROM utilisateurs WHERE id_utilisateur = current_user_id())
+    OR pg_has_role(current_user, 'banque_audit',  'MEMBER')
+    OR pg_has_role(current_user, 'banque_aml',    'MEMBER')
+    OR pg_has_role(current_user, 'banque_dba',    'MEMBER')
+);
+
+CREATE POLICY rls_journal_self ON journal_audit FOR SELECT
+USING (
+    id_utilisateur = current_user_id()
+    OR pg_has_role(current_user, 'banque_audit',    'MEMBER')
+    OR pg_has_role(current_user, 'banque_aml',      'MEMBER')
+    OR pg_has_role(current_user, 'banque_juridique', 'MEMBER')
+    OR pg_has_role(current_user, 'banque_dba',      'MEMBER')
+    OR pg_has_role(current_user, 'banque_readonly',  'MEMBER')
+);
+
+CREATE POLICY rls_cw_self ON chinese_wall_historique FOR SELECT
+USING (
+    id_utilisateur = current_user_id()
+    OR pg_has_role(current_user, 'banque_audit', 'MEMBER')
+    OR pg_has_role(current_user, 'banque_dba',   'MEMBER')
+);
+
+
+-- ==============================================================
+-- PARTIE 17 : FONCTION D'ATTRIBUTION AUTOMATIQUE
+-- ==============================================================
+
+CREATE OR REPLACE FUNCTION attribuer_acces_utilisateur(
+    p_matricule    VARCHAR,
+    p_attribue_par VARCHAR DEFAULT 'SYSTEME'
+)
+RETURNS TABLE (etape TEXT, statut TEXT, detail TEXT)
+LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+    v_id_user    INT;
+    v_id_equipe  INT;
+    v_nom_equipe VARCHAR;
+    v_niveau_max niveau_enum;
+    v_pg_role    VARCHAR;
+    v_id_admin   INT;
+    v_role       RECORD;
+    v_count      INT := 0;
 BEGIN
-    -- Ce trigger s'activerait sur une table "demandes_acces" en production
-    -- Ici on montre le pattern
-    INSERT INTO journal_audit
-        (id_utilisateur, id_ressource, type_ressource, action, decision, horodatage)
+    -- Vérifier l'utilisateur
+    SELECT u.id_utilisateur, u.id_equipe, e.nom, e.niveau_max
+    INTO   v_id_user, v_id_equipe, v_nom_equipe, v_niveau_max
+    FROM   utilisateurs u
+    JOIN   equipes e ON u.id_equipe = e.id_equipe
+    WHERE  u.matricule = UPPER(p_matricule) AND u.statut = 'ACTIF';
+
+    IF NOT FOUND THEN
+        RETURN QUERY SELECT
+            'Verification utilisateur'::TEXT, 'ERREUR'::TEXT,
+            ('Utilisateur ' || p_matricule || ' introuvable ou inactif')::TEXT;
+        RETURN;
+    END IF;
+
+    RETURN QUERY SELECT 'Verification utilisateur'::TEXT, 'OK'::TEXT,
+        ('id=' || v_id_user || ' equipe=' || v_nom_equipe || ' niveau=' || v_niveau_max)::TEXT;
+
+    -- Résoudre l'admin
+    SELECT id_utilisateur INTO v_id_admin
+    FROM   utilisateurs WHERE matricule = UPPER(p_attribue_par);
+
+    -- Mapper équipe → rôle PostgreSQL
+    v_pg_role := CASE v_nom_equipe
+        WHEN 'Relation clientele'    THEN 'banque_rc'
+        WHEN 'Back-office'           THEN 'banque_bo'
+        WHEN 'Gestion de patrimoine' THEN 'banque_gp'
+        WHEN 'Risque'                THEN 'banque_risque'
+        WHEN 'Conformite / AML'      THEN 'banque_aml'
+        WHEN 'Audit interne'         THEN 'banque_audit'
+        WHEN 'Juridique'             THEN 'banque_juridique'
+        WHEN 'Cadres commerciaux'    THEN 'banque_commercial'
+        WHEN 'Experts regionaux'     THEN 'banque_expert'
+        WHEN 'Support'               THEN 'banque_support'
+        ELSE NULL
+    END;
+
+    IF v_pg_role IS NOT NULL THEN
+        -- Créer le login PostgreSQL s'il n'existe pas
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = LOWER(p_matricule)) THEN
+            EXECUTE format(
+                'CREATE ROLE %I LOGIN PASSWORD %L',
+                LOWER(p_matricule),
+                'Banque_' || p_matricule || '_2024!'
+            );
+        END IF;
+        EXECUTE format('GRANT %I TO %I', v_pg_role, LOWER(p_matricule));
+        RETURN QUERY SELECT 'Role PostgreSQL'::TEXT, 'OK'::TEXT,
+            ('login=' || LOWER(p_matricule) || ' → ' || v_pg_role)::TEXT;
+    ELSE
+        RETURN QUERY SELECT 'Role PostgreSQL'::TEXT, 'AVERTISSEMENT'::TEXT,
+            ('Equipe inconnue : ' || v_nom_equipe)::TEXT;
+    END IF;
+
+    -- Attribuer les rôles RBAC de l'équipe
+    FOR v_role IN
+        SELECT id_role, nom_role FROM roles WHERE id_equipe = v_id_equipe
+    LOOP
+        INSERT INTO utilisateur_roles (id_utilisateur, id_role, date_debut, actif)
+        VALUES (v_id_user, v_role.id_role, CURRENT_DATE, TRUE)
+        ON CONFLICT (id_utilisateur, id_role)
+        DO UPDATE SET actif = TRUE, date_debut = CURRENT_DATE, date_fin = NULL;
+        v_count := v_count + 1;
+    END LOOP;
+
+    RETURN QUERY SELECT 'Roles RBAC'::TEXT, 'OK'::TEXT,
+        (v_count || ' role(s) attribue(s) pour ' || v_nom_equipe)::TEXT;
+
+    -- Initialiser / mettre à jour l'habilitation BLP
+    INSERT INTO blp_habilitations
+      (id_utilisateur, niveau_max, date_attribution, attribue_par, commentaire)
     VALUES
-        (NEW.id_utilisateur, NEW.id_ressource, 'SYSTEME', 'LIRE', 'AUTORISE', NOW());
+      (v_id_user, v_niveau_max, CURRENT_DATE, v_id_admin,
+       'Attribution automatique - equipe ' || v_nom_equipe)
+    ON CONFLICT (id_utilisateur)
+    DO UPDATE SET
+        niveau_max       = EXCLUDED.niveau_max,
+        date_attribution = EXCLUDED.date_attribution,
+        attribue_par     = EXCLUDED.attribue_par,
+        commentaire      = EXCLUDED.commentaire;
+
+    RETURN QUERY SELECT 'Habilitation BLP'::TEXT, 'OK'::TEXT,
+        ('niveau_max=' || v_niveau_max)::TEXT;
+
+    -- Activer MFA automatiquement pour N3/N4
+    IF v_niveau_max IN ('N3','N4') THEN
+        UPDATE utilisateurs SET mfa_actif = TRUE
+        WHERE  id_utilisateur = v_id_user AND mfa_actif = FALSE;
+        RETURN QUERY SELECT 'MFA'::TEXT, 'OK'::TEXT,
+            ('MFA active automatiquement (niveau ' || v_niveau_max || ')')::TEXT;
+    ELSE
+        RETURN QUERY SELECT 'MFA'::TEXT, 'NON_REQUIS'::TEXT,
+            ('Niveau ' || v_niveau_max || ' - MFA optionnel')::TEXT;
+    END IF;
+
+    -- Journaliser l'attribution
+    INSERT INTO journal_audit
+      (id_utilisateur, type_ressource, action, decision, horodatage, justification)
+    VALUES
+      (v_id_user, 'SYSTEME', 'ECRIRE', 'AUTORISE', NOW(),
+       'Attribution automatique - equipe: ' || v_nom_equipe
+       || ' | niveau: ' || v_niveau_max
+       || ' | roles RBAC: ' || v_count
+       || ' | par: ' || p_attribue_par);
+
+    RETURN QUERY SELECT 'Journalisation'::TEXT, 'OK'::TEXT,
+        'Attribution enregistree dans journal_audit'::TEXT;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION attribuer_acces_utilisateur(VARCHAR, VARCHAR)
+    TO banque_dba, banque_audit;
+
+
+-- ==============================================================
+-- PARTIE 18 : FONCTION DE RÉVOCATION AUTOMATIQUE
+-- ==============================================================
+
+CREATE OR REPLACE FUNCTION revoquer_acces_utilisateur(
+    p_matricule   VARCHAR,
+    p_motif       TEXT    DEFAULT 'Revocation manuelle',
+    p_revoque_par VARCHAR DEFAULT 'SYSTEME'
+)
+RETURNS TABLE (etape TEXT, statut TEXT, detail TEXT)
+LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+    v_id_user INT;
+    v_count   INT;
+BEGIN
+    SELECT id_utilisateur INTO v_id_user
+    FROM   utilisateurs WHERE matricule = UPPER(p_matricule);
+
+    IF NOT FOUND THEN
+        RETURN QUERY SELECT 'Verification'::TEXT, 'ERREUR'::TEXT,
+            ('Utilisateur ' || p_matricule || ' introuvable')::TEXT;
+        RETURN;
+    END IF;
+
+    -- Désactiver tous les rôles RBAC
+    UPDATE utilisateur_roles
+    SET    actif = FALSE, date_fin = CURRENT_DATE
+    WHERE  id_utilisateur = v_id_user AND actif = TRUE;
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN QUERY SELECT 'Revocation RBAC'::TEXT, 'OK'::TEXT,
+        (v_count || ' role(s) revoques')::TEXT;
+
+    -- Expirer les accès temporaires
+    UPDATE acces_temporaire
+    SET    statut = 'EXPIRE', date_revocation = NOW()
+    WHERE  id_utilisateur = v_id_user AND statut = 'ACTIF';
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN QUERY SELECT 'Acces temporaires'::TEXT, 'OK'::TEXT,
+        (v_count || ' acces temporaire(s) expires')::TEXT;
+
+    -- Suspendre le compte métier
+    UPDATE utilisateurs SET statut = 'SUSPENDU'
+    WHERE  id_utilisateur = v_id_user;
+    RETURN QUERY SELECT 'Suspension compte'::TEXT, 'OK'::TEXT, 'Statut -> SUSPENDU'::TEXT;
+
+    -- Révoquer le login PostgreSQL
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = LOWER(p_matricule)) THEN
+        EXECUTE format('ALTER ROLE %I NOLOGIN', LOWER(p_matricule));
+        RETURN QUERY SELECT 'Role PostgreSQL'::TEXT, 'OK'::TEXT,
+            (LOWER(p_matricule) || ' -> NOLOGIN')::TEXT;
+    END IF;
+
+    -- Journaliser
+    INSERT INTO journal_audit
+      (id_utilisateur, type_ressource, action, decision, horodatage, justification)
+    VALUES (v_id_user, 'SYSTEME', 'SUPPRIMER', 'AUTORISE', NOW(),
+            'Revocation complete - motif: ' || p_motif || ' | par: ' || p_revoque_par);
+    RETURN QUERY SELECT 'Journalisation'::TEXT, 'OK'::TEXT,
+        'Revocation enregistree dans journal_audit'::TEXT;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION revoquer_acces_utilisateur(VARCHAR, TEXT, VARCHAR)
+    TO banque_dba, banque_audit;
+
+
+-- ==============================================================
+-- PARTIE 19 : FONCTION D'ACCÈS TEMPORAIRE CONTRÔLÉ
+-- ==============================================================
+
+CREATE OR REPLACE FUNCTION accorder_acces_temporaire(
+    p_matricule_user  VARCHAR,
+    p_ref_ressource   VARCHAR,
+    p_nb_heures       INT,
+    p_justification   TEXT,
+    p_matricule_admin VARCHAR
+)
+RETURNS TABLE (etape TEXT, statut TEXT, detail TEXT)
+LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+    v_id_user      INT;
+    v_id_ressource INT;
+    v_id_admin     INT;
+    v_niveau_res   niveau_enum;
+    v_niveau_admin niveau_enum;
+    v_duree_max    INT;
+BEGIN
+    SELECT id_utilisateur INTO v_id_user
+    FROM   utilisateurs WHERE matricule = UPPER(p_matricule_user) AND statut = 'ACTIF';
+
+    SELECT id_utilisateur INTO v_id_admin
+    FROM   utilisateurs WHERE matricule = UPPER(p_matricule_admin) AND statut = 'ACTIF';
+
+    SELECT id_ressource, niveau_requis INTO v_id_ressource, v_niveau_res
+    FROM   ressources WHERE reference = p_ref_ressource AND actif = TRUE;
+
+    IF v_id_user IS NULL OR v_id_ressource IS NULL OR v_id_admin IS NULL THEN
+        RETURN QUERY SELECT 'Verification'::TEXT, 'ERREUR'::TEXT,
+            'Utilisateur, ressource ou admin introuvable'::TEXT;
+        RETURN;
+    END IF;
+
+    -- L'admin doit avoir un niveau >= niveau de la ressource
+    SELECT niveau_max INTO v_niveau_admin
+    FROM   blp_habilitations WHERE id_utilisateur = v_id_admin;
+
+    IF v_niveau_admin < v_niveau_res THEN
+        RETURN QUERY SELECT 'Verification BLP admin'::TEXT, 'REFUSE'::TEXT,
+            ('Admin ' || p_matricule_admin || ' niveau ' || v_niveau_admin
+             || ' < ressource niveau ' || v_niveau_res)::TEXT;
+        RETURN;
+    END IF;
+    RETURN QUERY SELECT 'Verification BLP admin'::TEXT, 'OK'::TEXT,
+        ('Admin niveau ' || v_niveau_admin || ' >= ressource niveau ' || v_niveau_res)::TEXT;
+
+    -- Respecter la durée max ABAC
+    SELECT MIN(ap.duree_max_heures) INTO v_duree_max
+    FROM   abac_politiques ap
+    JOIN   utilisateur_roles ur ON ap.id_role = ur.id_role
+    WHERE  ur.id_utilisateur = v_id_user AND ur.actif = TRUE
+      AND  ap.duree_max_heures IS NOT NULL;
+
+    IF v_duree_max IS NOT NULL AND p_nb_heures > v_duree_max THEN
+        RETURN QUERY SELECT 'Verification ABAC duree'::TEXT, 'REFUSE'::TEXT,
+            ('Duree ' || p_nb_heures || 'h > max autorise ' || v_duree_max || 'h')::TEXT;
+        RETURN;
+    END IF;
+    RETURN QUERY SELECT 'Verification ABAC duree'::TEXT, 'OK'::TEXT,
+        (p_nb_heures || 'h <= max=' || COALESCE(v_duree_max::TEXT, 'illimite'))::TEXT;
+
+    -- Insérer l'accès temporaire
+    INSERT INTO acces_temporaire
+      (id_utilisateur, id_ressource, justification, date_debut, date_fin,
+       autorise_par, revocation_auto)
+    VALUES
+      (v_id_user, v_id_ressource, p_justification,
+       NOW(), NOW() + (p_nb_heures || ' hours')::INTERVAL,
+       v_id_admin, TRUE);
+
+    RETURN QUERY SELECT 'Creation acces temporaire'::TEXT, 'OK'::TEXT,
+        ('Valide ' || p_nb_heures || 'h - expire le '
+         || TO_CHAR(NOW() + (p_nb_heures || ' hours')::INTERVAL, 'DD/MM/YYYY HH24:MI'))::TEXT;
+
+    -- Journaliser
+    INSERT INTO journal_audit
+      (id_utilisateur, id_ressource, type_ressource, action, decision,
+       horodatage, justification)
+    VALUES (v_id_user, v_id_ressource, 'ACCES_TEMPORAIRE', 'ECRIRE', 'AUTORISE', NOW(),
+            'Acces temporaire accorde par ' || p_matricule_admin
+            || ' - duree: ' || p_nb_heures || 'h - motif: ' || p_justification);
+
+    RETURN QUERY SELECT 'Journalisation'::TEXT, 'OK'::TEXT,
+        'Acces temporaire enregistre dans journal_audit'::TEXT;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION accorder_acces_temporaire(VARCHAR, VARCHAR, INT, TEXT, VARCHAR)
+    TO banque_dba, banque_audit, banque_aml, banque_juridique;
+
+
+-- ==============================================================
+-- PARTIE 20 : TRIGGER D'ATTRIBUTION AUTOMATIQUE À L'INSERTION
+-- ==============================================================
+
+CREATE OR REPLACE FUNCTION trigger_auto_attribution()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE r RECORD;
+BEGIN
+    FOR r IN
+        SELECT * FROM attribuer_acces_utilisateur(NEW.matricule, 'SYSTEME')
+    LOOP
+        RAISE NOTICE '[auto_attribution] matricule=% | % | % | %',
+            NEW.matricule, r.etape, r.statut, r.detail;
+    END LOOP;
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$;
+
+CREATE TRIGGER trg_auto_attribution
+    AFTER INSERT ON utilisateurs
+    FOR EACH ROW
+    EXECUTE FUNCTION trigger_auto_attribution();
 
 
--- -------------------------------------------------------------
--- 14. TRIGGER : REVOCATION AUTOMATIQUE ACCES TEMPORAIRES
--- -------------------------------------------------------------
+-- ==============================================================
+-- PARTIE 21 : TRIGGER DE RÉVOCATION AUTOMATIQUE DES ACCÈS EXPIRÉS
+-- ==============================================================
 
 CREATE OR REPLACE FUNCTION trigger_revocation_auto()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
     UPDATE acces_temporaire
-    SET statut = 'EXPIRE', date_revocation = NOW()
-    WHERE statut = 'ACTIF'
-      AND date_fin <= NOW()
-      AND revocation_auto = TRUE;
+    SET    statut = 'EXPIRE', date_revocation = NOW()
+    WHERE  statut = 'ACTIF'
+      AND  date_fin <= NOW()
+      AND  revocation_auto = TRUE;
     RETURN NULL;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
--- En production : executer via pg_cron ou un job planifie
--- SELECT cron.schedule('revocation_acces', '*/15 * * * *', 'SELECT trigger_revocation_auto()');
+CREATE TRIGGER trg_revocation_auto
+    AFTER INSERT OR UPDATE ON acces_temporaire
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION trigger_revocation_auto();
+
+-- Production : remplacer le trigger par pg_cron toutes les 15 min :
+-- SELECT cron.schedule('revoc_acces','*/15 * * * *',
+--   $$UPDATE acces_temporaire SET statut='EXPIRE', date_revocation=NOW()
+--     WHERE statut='ACTIF' AND date_fin <= NOW() AND revocation_auto=TRUE$$);
 
 
--- =============================================================
--- REQUETES DE VALIDATION (a executer apres installation)
--- =============================================================
+-- ==============================================================
+-- PARTIE 22 : TESTS DE VALIDATION COMPLETS
+-- ==============================================================
 
--- Test 1 : Directeur commercial tente de lire un dossier AML
--- SELECT * FROM controler_acces(17, 7, 'LIRE', NULL);
--- Resultat attendu : REFUSE / BLP
+-- --- TESTS BASIQUES ---
 
--- Test 2 : Analyste AML lit un dossier AML avec justification
--- SELECT * FROM controler_acces(10, 7, 'LIRE', 'Investigation blanchiment dossier 2024-01');
--- Resultat attendu : AUTORISE
+-- Test 1 : Conseiller RC lit son propre client (AUTORISE)
+-- SELECT * FROM controler_acces(
+--     (SELECT id_utilisateur FROM utilisateurs WHERE matricule='RC001'),
+--     (SELECT id_ressource   FROM ressources    WHERE reference='CLI-TN-001'),
+--     'LIRE', NULL
+-- );
+-- Attendu : AUTORISE
 
--- Test 3 : Operateur BO tente de modifier une analyse risque
--- SELECT * FROM controler_acces(4, 12, 'MODIFIER', 'Correction erreur');
--- Resultat attendu : REFUSE / BIBA
+-- Test 2 : Directeur commercial tente de lire un dossier AML (REFUSE/BLP)
+-- SELECT * FROM controler_acces(
+--     (SELECT id_utilisateur FROM utilisateurs WHERE matricule='CC001'),
+--     (SELECT id_ressource   FROM ressources    WHERE reference='AML-FR-2024-01'),
+--     'LIRE', NULL
+-- );
+-- Attendu : REFUSE | BLP
 
--- Test 4 : Conseiller RC lit son client
--- SELECT * FROM controler_acces(1, 1, 'LIRE', NULL);
--- Resultat attendu : AUTORISE
+-- Test 3 : Opérateur BO tente de modifier une analyse risque (REFUSE/BIBA)
+-- SELECT * FROM controler_acces(
+--     (SELECT id_utilisateur FROM utilisateurs WHERE matricule='BO001'),
+--     (SELECT id_ressource   FROM ressources    WHERE reference='RISQUE-Q4-24'),
+--     'MODIFIER', 'Correction erreur'
+-- );
+-- Attendu : REFUSE | BIBA
 
--- Test 5 : Audit senior lit le journal d'audit
--- SELECT * FROM controler_acces(14, 11, 'LIRE', 'Mission audit Q4 2024');
--- Resultat attendu : AUTORISE
+-- Test 4 : Analyste AML lit son dossier (AUTORISE — MFA + justification requis)
+-- SELECT * FROM controler_acces(
+--     (SELECT id_utilisateur FROM utilisateurs WHERE matricule='AML001'),
+--     (SELECT id_ressource   FROM ressources    WHERE reference='AML-FR-2024-01'),
+--     'LIRE', 'Investigation blanchiment dossier 2024-01'
+-- );
+-- Attendu : AUTORISE
 
--- Test 6 : Droits effectifs du conseiller patrimoine GP001
+-- Test 5 : Auditeur senior lit le journal audit (AUTORISE)
+-- SELECT * FROM controler_acces(
+--     (SELECT id_utilisateur FROM utilisateurs WHERE matricule='AI002'),
+--     (SELECT id_ressource   FROM ressources    WHERE reference='AUDIT-LOG-01'),
+--     'LIRE', 'Mission audit Q4 2024'
+-- );
+-- Attendu : AUTORISE
+
+-- Test 6 : Conseiller RC tente de lire un portefeuille GP (REFUSE/RBAC)
+-- SELECT * FROM controler_acces(
+--     (SELECT id_utilisateur FROM utilisateurs WHERE matricule='RC001'),
+--     (SELECT id_ressource   FROM ressources    WHERE reference='PTF-FR-GP01'),
+--     'LIRE', NULL
+-- );
+-- Attendu : REFUSE | RBAC
+
+-- --- TEST CHINESE WALL ---
+
+-- Test 7 : GP Sophie tente d'accéder au portefeuille Beta (REFUSE/CW)
+-- (Elle a déjà accédé au groupe GROUPE_INDUS_ALPHA)
+-- SELECT * FROM controler_acces(
+--     (SELECT id_utilisateur FROM utilisateurs WHERE matricule='GP001'),
+--     (SELECT id_ressource   FROM ressources    WHERE reference='PTF-TN-GP02'),
+--     'LIRE', 'Analyse comparative portefeuilles'
+-- );
+-- Attendu : REFUSE | CHINESE_WALL
+
+-- --- TESTS FONCTIONS AUTOMATIQUES ---
+
+-- Test 8 : Attribution automatique pour un nouvel utilisateur
+-- SELECT * FROM attribuer_acces_utilisateur('RC001', 'AI002');
+
+-- Test 9 : Accorder un accès temporaire (Expert → Investigation)
+-- SELECT * FROM accorder_acces_temporaire(
+--     'ER001', 'INV-REG-2024', 720,
+--     'Expertise droit tunisien requise pour ACPR 2024', 'AI002'
+-- );
+
+-- Test 10 : Révoquer un utilisateur
+-- SELECT * FROM revoquer_acces_utilisateur('RC001', 'Depart entreprise', 'AI002');
+
+-- --- TABLEAUX DE BORD ---
+
+-- Test 11 : Droits effectifs d'un utilisateur
 -- SELECT * FROM v_droits_utilisateur WHERE matricule = 'GP001';
 
--- Test 7 : Tableau de bord des refus par modele
+-- Test 12 : Refus par modèle de sécurité
 -- SELECT * FROM v_refus_par_modele;
 
--- Test 8 : Acces temporaires actifs
--- SELECT * FROM v_acces_temporaires_actifs;-- =============================================================
---  AJOUT : ROLE GUICHETIER_RESPONSABLE
---  Banque Internationale -- Service Guichet / Front Desk
---  Auteur : mise à jour du système de contrôle d'accès
--- =============================================================
+-- Test 13 : Accès temporaires actifs
+-- SELECT * FROM v_acces_temporaires_actifs;
 
--- -------------------------------------------------------------
--- SECTION A : NOUVEAU RÔLE -- guichetier_responsable
--- (Equipe 1 = Relation clientèle)
--- -------------------------------------------------------------
+-- Test 14 : Alertes Chinese Wall
+-- SELECT * FROM v_chinese_wall_alertes;
 
--- A.1  Ajout du rôle dans la table roles
-INSERT INTO roles (nom_role, id_equipe, niveau_acces, description) VALUES
-('guichetier_responsable', 1, 'N2',
- 'Responsable du service guichet : accueil physique, opérations courantes clients, '
- 'validation des transactions guichet, supervision des guichetiers ordinaires, '
- 'gestion des files d''attente et des situations exceptionnelles au comptoir.');
+-- Test 15 : Journal complet des 20 dernières entrées
+-- SELECT ja.horodatage, u.matricule, ja.type_ressource, ja.action,
+--        ja.decision, ja.modele_bloquant, ja.motif_refus
+-- FROM   journal_audit ja
+-- JOIN   utilisateurs u ON ja.id_utilisateur = u.id_utilisateur
+-- ORDER  BY ja.horodatage DESC
+-- LIMIT  20;
 
-
--- A.2  Nouvelles permissions spécifiques au guichet
---      (ajout dans la table permissions si elles n''existent pas déjà)
-
-INSERT INTO permissions (ressource_type, action, niveau_min, description)
-VALUES
-  ('OPERATIONS_GUICHET', 'LIRE',      'N1',
-   'Consulter la file d''attente et les opérations guichet en cours'),
-  ('OPERATIONS_GUICHET', 'ECRIRE',    'N1',
-   'Enregistrer une opération réalisée au guichet (dépôt, retrait, change...)'),
-  ('OPERATIONS_GUICHET', 'VALIDER',   'N2',
-   'Valider ou rejeter une opération guichet (supervisor guichet uniquement)'),
-  ('OPERATIONS_GUICHET', 'MODIFIER',  'N2',
-   'Corriger une opération guichet avant clôture journalière')
-ON CONFLICT (ressource_type, action) DO NOTHING;
-
-
--- A.3  Association rôle <-> permissions
---      Le guichetier_responsable hérite des permissions de base (clientèle)
---      + les nouvelles permissions guichet + la validation
-
-INSERT INTO role_permissions
-  SELECT r.id_role, p.id_permission
-  FROM roles r, permissions p
-  WHERE r.nom_role = 'guichetier_responsable'
-    AND (
-      -- Opérations clients de base
-      (p.ressource_type IN ('DONNEES_CLIENT', 'DOSSIER_KYC', 'OPERATIONS_COURANTES')
-       AND p.action IN ('LIRE', 'ECRIRE', 'VALIDER'))
-      OR
-      -- Contrats crédit : lecture uniquement (contexte guichet)
-      (p.ressource_type = 'CONTRAT_CREDIT'
-       AND p.action = 'LIRE')
-      OR
-      -- KPI commerciaux : lecture pour suivi performance guichet
-      (p.ressource_type = 'KPI_COMMERCIAL'
-       AND p.action = 'LIRE')
-      OR
-      -- Journal d''audit : écriture système (traçabilité guichet)
-      (p.ressource_type = 'JOURNAL_AUDIT'
-       AND p.action = 'ECRIRE')
-      OR
-      -- Toutes les permissions OPERATIONS_GUICHET
-      p.ressource_type = 'OPERATIONS_GUICHET'
-    )
-ON CONFLICT DO NOTHING;
-
-
--- -------------------------------------------------------------
--- SECTION B : NOUVEAUX UTILISATEURS guichetier_responsable
--- -------------------------------------------------------------
-
-INSERT INTO utilisateurs
-  (matricule, nom, prenom, email, id_equipe, code_pays, mfa_actif)
-VALUES
-  ('GR001', 'Gharbi',   'Mehdi',   'mehdi.gharbi@banque.tn',   1, 'TN', FALSE),
-  ('GR002', 'Leroux',   'Isabelle','isabelle.leroux@banque.fr', 1, 'FR', FALSE),
-  ('GR003', 'El Amri',  'Faycal',  'faycal.elamri@banque.ma',  1, 'MA', FALSE);
-
-
--- -------------------------------------------------------------
--- SECTION C : HABILITATIONS BLP (niveau N2 -- Sensible)
--- -------------------------------------------------------------
-
-INSERT INTO blp_habilitations (id_utilisateur, niveau_max, attribue_par, commentaire)
-SELECT
-    u.id_utilisateur,
-    'N2',
-    (SELECT id_utilisateur FROM utilisateurs WHERE matricule = 'AI002'),
-    'Habilitation N2 -- Responsable guichet, accès données clients sensibles'
-FROM utilisateurs u
-WHERE u.matricule IN ('GR001','GR002','GR003')
-ON CONFLICT (id_utilisateur) DO NOTHING;
-
-
--- -------------------------------------------------------------
--- SECTION D : ATTRIBUTION DU RÔLE AUX NOUVEAUX UTILISATEURS
--- -------------------------------------------------------------
-
-INSERT INTO utilisateur_roles (id_utilisateur, id_role)
-SELECT
-    u.id_utilisateur,
-    r.id_role
-FROM utilisateurs u, roles r
-WHERE u.matricule IN ('GR001','GR002','GR003')
-  AND r.nom_role = 'guichetier_responsable'
-ON CONFLICT DO NOTHING;
-
-
--- -------------------------------------------------------------
--- SECTION E : NOUVELLE RESSOURCE -- opérations guichet
--- -------------------------------------------------------------
-
-INSERT INTO ressources
-  (reference, type_ressource, niveau_requis, code_pays, id_proprietaire, description)
-VALUES
-  ('GUICHET-TN-2024',
-   'OPERATIONS_GUICHET', 'N1', 'TN',
-   (SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR001'),
-   'Journal des opérations guichet -- agence Tunisie 2024'),
-  ('GUICHET-FR-2024',
-   'OPERATIONS_GUICHET', 'N1', 'FR',
-   (SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR002'),
-   'Journal des opérations guichet -- agence France 2024'),
-  ('GUICHET-MA-2024',
-   'OPERATIONS_GUICHET', 'N1', 'MA',
-   (SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR003'),
-   'Journal des opérations guichet -- agence Maroc 2024');
-
-
--- -------------------------------------------------------------
--- SECTION F : POLITIQUE ABAC -- guichetier_responsable
--- -------------------------------------------------------------
-
-INSERT INTO abac_politiques
-  (nom, id_role, type_ressource,
-   filtre_pays, filtre_portefeuille, duree_max_heures,
-   heure_debut, heure_fin, jours_semaine, description)
-VALUES
--- F.1  Accès clients : filtré par pays de l''agence, heures d''ouverture
-('GUICHET_resp_clients',
-  (SELECT id_role FROM roles WHERE nom_role='guichetier_responsable'),
-  'DONNEES_CLIENT',
-  TRUE, FALSE, NULL,
-  '07:30', '18:30', 'LUN-SAM',
-  'Responsable guichet : accès aux données clients de son pays uniquement, '
-  'pendant les heures d''ouverture (lun–sam 7h30–18h30)'),
-
--- F.2  Opérations guichet : accès étendu pour gestion des fins de journée
-('GUICHET_resp_operations',
-  (SELECT id_role FROM roles WHERE nom_role='guichetier_responsable'),
-  'OPERATIONS_GUICHET',
-  TRUE, FALSE, NULL,
-  '07:00', '19:30', 'LUN-SAM',
-  'Responsable guichet : gestion et validation des opérations guichet de son agence, '
-  'clôture de caisse incluse (7h00–19h30)'),
-
--- F.3  Situations exceptionnelles : accès urgence limité (ex : incident caisse)
-('GUICHET_resp_urgence',
-  (SELECT id_role FROM roles WHERE nom_role='guichetier_responsable'),
-  'OPERATIONS_COURANTES',
-  TRUE, FALSE, 4,
-  '00:00', '23:59', 'LUN-DIM',
-  'Accès exceptionnel 24/7 limité à 4h pour incidents guichet critiques -- '
-  'justification obligatoire et traçabilité renforcée');
-
-
--- -------------------------------------------------------------
--- SECTION G : ENTRÉES DE DÉMONSTRATION DANS LE JOURNAL D''AUDIT
--- -------------------------------------------------------------
-
-INSERT INTO journal_audit
-  (id_utilisateur, id_ressource, type_ressource, action, decision,
-   motif_refus, modele_bloquant, adresse_ip, justification)
-VALUES
--- G.1  Guichetier responsable valide une opération guichet (autorisé)
-((SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR001'),
-  (SELECT id_ressource FROM ressources WHERE reference='GUICHET-TN-2024'),
-  'OPERATIONS_GUICHET', 'VALIDER', 'AUTORISE',
-  NULL, NULL, '196.20.5.21',
-  'Validation clôture de caisse journée -- agence Tunis Centre'),
-
--- G.2  Guichetier responsable lit un dossier client (autorisé)
-((SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR001'),
-  (SELECT id_ressource FROM ressources WHERE reference='CLI-TN-001'),
-  'DONNEES_CLIENT', 'LIRE', 'AUTORISE',
-  NULL, NULL, '196.20.5.21', NULL),
-
--- G.3  Guichetier responsable tente de lire un dossier AML (refusé BLP)
-((SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR002'),
-  (SELECT id_ressource FROM ressources WHERE reference='AML-FR-2024-01'),
-  'DOSSIER_AML', 'LIRE', 'REFUSE',
-  'Niveau habilitation insuffisant : N2 < N4 requis', 'BLP',
-  '10.0.8.33', NULL),
-
--- G.4  Guichetier responsable tente de modifier un portefeuille GP (refusé RBAC)
-((SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR002'),
-  (SELECT id_ressource FROM ressources WHERE reference='PTF-FR-GP01'),
-  'PORTEFEUILLE', 'MODIFIER', 'REFUSE',
-  'Role guichetier_responsable non autorisé sur PORTEFEUILLE/MODIFIER', 'RBAC',
-  '10.0.8.33', NULL);
-
-
--- =============================================================
---  REQUÊTES DE VALIDATION DU RÔLE guichetier_responsable
--- =============================================================
-
--- Test G-1 : Droits effectifs du guichetier responsable GR001
--- SELECT * FROM v_droits_utilisateur WHERE matricule = 'GR001';
-
--- Test G-2 : Guichetier responsable valide une opération guichet
--- SELECT * FROM controler_acces(
---     (SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR001'),
---     (SELECT id_ressource FROM ressources WHERE reference='GUICHET-TN-2024'),
---     'VALIDER', NULL
--- );
--- Résultat attendu : AUTORISE
-
--- Test G-3 : Guichetier responsable tente de lire un dossier AML (interdit BLP)
--- SELECT * FROM controler_acces(
---     (SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR001'),
---     (SELECT id_ressource FROM ressources WHERE reference='AML-TN-2024-01'),
---     'LIRE', NULL
--- );
--- Résultat attendu : REFUSE / BLP
-
--- Test G-4 : Guichetier responsable lit les données d'un client
--- SELECT * FROM controler_acces(
---     (SELECT id_utilisateur FROM utilisateurs WHERE matricule='GR001'),
---     (SELECT id_ressource FROM ressources WHERE reference='CLI-TN-001'),
---     'LIRE', NULL
--- );
--- Résultat attendu : AUTORISE
+-- ==============================================================
+--  FIN DU FICHIER
+--  Un seul fichier — une seule commande pour tout déployer :
+--  psql -U postgres -d ma_base -f banque_internationale_complet.sql
+-- ==============================================================
