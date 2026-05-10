@@ -1,0 +1,59 @@
+-- ==============================================================
+--  BANQUE INTERNATIONALE — 6 REQUÊTES DE TEST (CORRIGÉES)
+--  Fonctions : controler_acces() + attribuer_acces_utilisateur()
+
+
+
+-- ── TEST 1 ── REFUSÉ AUTH ─────────────────────────────────────
+-- CC001 (directeur_commercial, mfa_actif = FALSE) tente de lire AML-FR-2024-01 (N4)
+-- • AML-FR-2024-01 est N4 → niveaux_securite.mfa_requis = TRUE
+-- • CC001.mfa_actif = FALSE → blocage immédiat avant même RBAC ou BLP
+-- Attendu : REFUSE | modele_bloquant = AUTH
+SELECT * FROM controler_acces(
+    (SELECT id_utilisateur FROM utilisateurs WHERE matricule = 'CC001'),
+    (SELECT id_ressource   FROM ressources    WHERE reference = 'AML-FR-2024-01'),
+    'LIRE',
+    NULL
+);
+
+
+-- ── TEST 2 ── REFUSÉ RBAC ─────────────────────────────────────
+-- RC001 (conseiller_particulier) tente de lire PTF-FR-GP01 (PORTEFEUILLE, N3)
+--   conseiller_particulier n'a PAS OPERATIONS_COURANTES/VALIDER (réservé superviseur)
+-- Attendu : REFUSE | modele_bloquant = RBAC
+SELECT * FROM controler_acces(
+    (SELECT id_utilisateur FROM utilisateurs WHERE matricule = 'RC001'),
+    (SELECT id_ressource   FROM ressources    WHERE reference = 'OPS-BO-2024'),
+    'VALIDER',
+    NULL
+);
+
+
+
+
+
+-- ── TEST 3 ── REFUSÉ CHINESE WALL ────────────────────────────
+-- RS001 (analyste_risque_credit, N3, FR, mfa_actif=TRUE) tente de lire PTF-TN-GP02
+-- RS001 a déjà GROUPE_INDUS_ALPHA dans son historique CW (inséré en PARTIE 10)
+-- PTF-TN-GP02 appartient à GROUPE_INDUS_BETA, même classe INDUSTRIE → conflit CW
+-- • CHINESE WALL : GROUPE_INDUS_BETA ≠ GROUPE_INDUS_ALPHA, même classe → REFUSE ✓
+-- Attendu : REFUSE | modele_bloquant = CHINESE_WALL
+SELECT * FROM controler_acces(
+    (SELECT id_utilisateur FROM utilisateurs WHERE matricule = 'RS001'),
+    (SELECT id_ressource   FROM ressources    WHERE reference = 'PTF-TN-GP02'),
+    'LIRE',
+    'Analyse exposition croisee groupes industriels'
+);
+
+
+-- ── TEST 4 ── ATTRIBUTION AUTOMATIQUE DES DROITS ─────────────
+-- Déclencher manuellement attribuer_acces_utilisateur pour GR001 (guichetier TN)
+-- autorisé par AI002 (auditeur senior, habilité à appeler la fonction)
+-- Attendu (étapes retournées) :
+--   • Verification utilisateur → OK  (id, equipe=Relation clientele, niveau=N2)
+--   • Role PostgreSQL           → OK  (login=gr001 → banque_rc)
+--   • Roles RBAC                → OK  (N rôles attribués pour Relation clientele)
+--   • Habilitation BLP          → OK  (niveau_max=N2)
+--   • MFA                       → NON_REQUIS (N2 < N3)
+--   • Journalisation            → OK
+SELECT * FROM attribuer_acces_utilisateur('GR001', 'AI002');
