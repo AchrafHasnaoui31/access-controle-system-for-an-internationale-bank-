@@ -1,41 +1,43 @@
 # International Bank Access Control System
 
-Database and security-modeling project for controlling access to sensitive areas and resources in an international banking context.
+> Academic database and security-modeling project for controlling access to sensitive banking areas and resources through explicit, testable authorization policies.
 
 ## Problem addressed
 
-Banking environments need traceable access decisions, separation of duties, and models that make authorization rules auditable. This project explores that relational foundation through schema design, policy models, SQL queries, and simulation scenarios.
+Banking environments need traceable access decisions, separation of duties, and policies that can be reviewed independently from application code. This project explores those foundations through relational modeling, SQL scenarios, and multiple access-control models.
 
 ## Security concepts explored
 
-- Role-based access control (RBAC).
-- Bell-LaPadula confidentiality rules.
-- Biba integrity rules.
-- Attribute-based access control (ABAC).
-- Chinese Wall conflict-of-interest constraints.
-- SQL scenarios for positive and negative authorization decisions.
+- **RBAC** — role-based access control.
+- **Bell-LaPadula** — confidentiality-oriented information flow.
+- **Biba** — integrity-oriented information flow.
+- **ABAC** — decisions based on user, resource, action, and context attributes.
+- **Chinese Wall** — conflict-of-interest constraints.
 
 ## Included material
 
 - Database structure documentation.
 - SQL schema and test queries.
-- Simulation data and presentation material.
-- A foundation for access history and audit review.
+- Simulation data and access scenarios.
+- Presentation and design artifacts.
+- A foundation for audit history and least-privilege review.
 
-## Problems solved
+## Engineering value
 
-- Makes authorization policies explicit instead of relying on undocumented assumptions.
-- Provides testable scenarios for access decisions.
-- Supports future least-privilege and auditability work.
+The project makes authorization assumptions explicit and creates a basis for testing both allowed and denied access. That is more useful than treating security as a UI-level permission check: the policy should be represented in data, queries, and verifiable rules.
 
 ## Roadmap
 
 - Add an executable normalized PostgreSQL schema and migrations.
-- Add immutable audit events and retention rules.
-- Add policy tests and threat-model documentation.
+- Add immutable audit events and retention policies.
+- Add policy tests for privilege escalation and conflict cases.
 - Add a small authenticated API for policy evaluation.
-- Add negative tests for privilege escalation and policy conflicts.
+- Add threat modeling and evidence-based security documentation.
 
-## Status and scope
+## Scope and status
 
 Academic security/database prototype. It is not a production banking security system and does not claim regulatory compliance.
+
+## License
+
+No open-source license is currently specified.
